@@ -187,7 +187,10 @@ export function speedSeries(frames, kp, fps, torso) {
 }
 
 // ---------- stroke detection ----------
-export const MIN_STROKE_GAP = 1.2; // seconds between two strokes
+export const MIN_STROKE_GAP = 1.6; // seconds between two strokes
+// Seen from the front much of the swing moves toward the camera, so the hand
+// looks slower on screen than it is.
+export const VIEW_SPEED = { side: 1, behind: 0.9, front: 0.7 };
 
 // Does a hand-speed peak look like a real swing? Rejects tracking glitches
 // (a point jumping for a frame or two), small movements (adjusting the grip,
@@ -229,7 +232,7 @@ export function strokeQuality(seq, contact, { hand = 'R', torso = null, v = null
 }
 
 // Returns contact frame indices (peaks of hitting-hand speed).
-export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity = 1, relative = 0.4 } = {}) {
+export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity = 1, relative = 0.4, view = 'side' } = {}) {
   const cfg = shotConfig(shot);
   const { frames, fps } = seq;
   if (frames.length < 5) return [];
@@ -237,7 +240,7 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
   const { wri } = handIdx(hand);
   const v = speedSeries(frames, wri, fps, torso);
   const peak = Math.max(...v);
-  const thresh = Math.max(cfg.minSpeed / sensitivity, peak * relative);
+  const thresh = Math.max((cfg.minSpeed * (VIEW_SPEED[view] || 1)) / sensitivity, peak * relative);
   const half = Math.max(2, Math.round(0.35 * fps));
   const gap = Math.round(MIN_STROKE_GAP * fps);
   const candidates = [];
@@ -249,12 +252,23 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
     }
     if (isMax && bodyVisible(frames[i]) && strokeQuality(seq, i, { hand, torso, v }).ok) candidates.push(i);
   }
-  // Strongest peaks win; a weaker peak close to a stronger one (for example
-  // the take-back just before the forward swing) is dropped.
-  candidates.sort((a, b) => v[b] - v[a]);
+  return pickStrokes(candidates, v, gap, fps);
+}
+
+// Of hand-speed peaks closer together than the minimum gap, keep one. The
+// preparation (take-back, or toss and racquet drop on a serve) comes 0.6 s or
+// more before the hit and can be nearly as fast, so such a later peak wins if
+// it reaches 75% of the earlier one. Peaks right after each other (contact and
+// follow-through) keep the faster one.
+export function pickStrokes(candidates, v, gap, fps = 30) {
   const out = [];
-  for (const i of candidates) if (out.every((j) => Math.abs(i - j) >= gap)) out.push(i);
-  return out.sort((a, b) => a - b);
+  const prepGap = Math.round(0.6 * fps);
+  for (const i of [...candidates].sort((a, b) => a - b)) {
+    const last = out[out.length - 1];
+    if (last == null || i - last >= gap) out.push(i);
+    else if (i - last >= prepGap ? v[i] >= 0.75 * v[last] : v[i] > v[last]) out[out.length - 1] = i;
+  }
+  return out;
 }
 
 // Cut a stroke window around a contact frame.

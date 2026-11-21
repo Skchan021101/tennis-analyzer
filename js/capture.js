@@ -1,6 +1,6 @@
 // Getting poses out of video: uploaded/recorded clips and the live camera.
 
-import { buildSequence, speedSeries, torsoLength, bodyVisible, cutStroke, strokeQuality, MIN_STROKE_GAP } from './analysis.js';
+import { buildSequence, speedSeries, torsoLength, bodyVisible, cutStroke, strokeQuality, pickStrokes, MIN_STROKE_GAP, VIEW_SPEED } from './analysis.js';
 import { shotConfig } from './shots.js';
 
 const FRAME_MAX_DIM = 480;
@@ -62,8 +62,8 @@ export async function processClip(video, estimator, { fps = 30, timeScale = 1, o
   };
 }
 
-function frameCanvas(w, h) {
-  const k = Math.min(1, FRAME_MAX_DIM / Math.max(w, h));
+function frameCanvas(w, h, maxDim = FRAME_MAX_DIM) {
+  const k = Math.min(1, maxDim / Math.max(w, h));
   const c = document.createElement('canvas');
   c.width = Math.round(w * k);
   c.height = Math.round(h * k);
@@ -108,13 +108,13 @@ export class LiveSession extends EventTarget {
     this.video = video;
     this.overlay = overlay;
     this.buffer = []; // {t, kps, bmp}
-    this.keepSeconds = 4;
+    this.keepSeconds = 5.5; // lead-in + confirmation window + margin
     this.running = false;
     this.detecting = true;
     this.lastContactT = -Infinity;
     this.facing = 'environment';
     this.fpsEstimate = 0;
-    this.config = { hand: 'R', shot: 'forehand', sensitivity: 1 };
+    this.config = { hand: 'R', shot: 'forehand', sensitivity: 1, view: 'side' };
     this.retained = new Map(); // bitmap -> number of captured strokes using it
     this.recentPeaks = []; // hand-speed peaks of the last few strokes
   }
@@ -192,7 +192,7 @@ export class LiveSession extends EventTarget {
     const w = v.videoWidth, h = v.videoHeight;
     if (!w || !h || v.readyState < 2) return;
     if (!this.fc || this.fc.srcW !== w || this.fc.srcH !== h) {
-      this.fc = frameCanvas(w, h);
+      this.fc = frameCanvas(w, h, 360); // ~5 s of live frames stays near 50 MB
       this.fc.srcW = w; this.fc.srcH = h;
       this.fctx = this.fc.getContext('2d');
     }
@@ -222,8 +222,11 @@ export class LiveSession extends EventTarget {
   detect(now) {
     const cfg = shotConfig(this.config.shot);
     const fps = 30;
-    const win = this.buffer.filter((s) => s.t >= now - (cfg.pre + cfg.post + 0.8));
-    if (win.length < 8 || win[win.length - 1].t - win[0].t < cfg.post + 0.5) return;
+    // A swing is confirmed only once nothing later can replace it: a hit that
+    // follows the preparation within MIN_STROKE_GAP takes its place.
+    const look = Math.max(cfg.post, MIN_STROKE_GAP);
+    const win = this.buffer.filter((s) => s.t >= now - (cfg.pre + look + 1.0));
+    if (win.length < 8 || win[win.length - 1].t - win[0].t < look + 0.5) return;
     const seq = buildSequence(win, { fps, width: this.video.videoWidth, height: this.video.videoHeight });
     const torso = torsoLength(seq.frames);
     const wri = this.config.hand === 'L' ? 9 : 10;
@@ -232,23 +235,21 @@ export class LiveSession extends EventTarget {
     const half = Math.round(0.35 * fps);
     // After a few swings, a stroke must also be at least 40% as fast as this
     // player's typical swing, which filters out slower in-between movements.
-    let minSpeed = cfg.minSpeed / this.config.sensitivity;
+    let minSpeed = (cfg.minSpeed * (VIEW_SPEED[this.config.view] || 1)) / this.config.sensitivity;
     if (this.recentPeaks.length >= 3) {
       const sorted = [...this.recentPeaks].sort((x, y) => x - y);
       minSpeed = Math.max(minSpeed, (0.4 / this.config.sensitivity) * sorted[sorted.length >> 1]);
     }
-    let best = -1;
+    const cands = [];
     for (let i = 0; i < v.length; i++) {
-      const ti = tOf(i);
-      if (ti > now - cfg.post || ti < now - cfg.post - 0.5) continue;
-      if (ti < this.lastContactT + MIN_STROKE_GAP) continue;
       if (v[i] < minSpeed || !bodyVisible(seq.frames[i])) continue;
       let isMax = true;
       for (let k = Math.max(0, i - half); k <= Math.min(v.length - 1, i + half); k++) if (v[k] > v[i]) { isMax = false; break; }
-      if (isMax && (best < 0 || v[i] > v[best])) best = i;
+      if (isMax && strokeQuality(seq, i, { hand: this.config.hand, torso, v }).ok) cands.push(i);
     }
-    if (best < 0) return;
-    if (!strokeQuality(seq, best, { hand: this.config.hand, torso, v }).ok) return;
+    const picked = pickStrokes(cands, v, Math.round(MIN_STROKE_GAP * fps), fps);
+    const best = picked.find((i) => tOf(i) <= now - look && tOf(i) > this.lastContactT + MIN_STROKE_GAP - 0.05);
+    if (best == null) return;
     const tc = tOf(best);
     if (tc - cfg.pre < this.buffer[0].t - 0.05) return; // not enough lead-in recorded yet
     this.lastContactT = tc;

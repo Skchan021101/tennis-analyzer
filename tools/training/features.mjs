@@ -28,11 +28,11 @@ export function loadClips(files) {
 }
 
 // One stroke per clip: the strongest detected swing (THETIS clips hold one).
-export function strokeOf(clip, hand = 'R') {
+export function strokeOf(clip, hand = 'R', view = clip.view || 'side') {
   const seq = A.buildSequence(clip.samples, { fps: 30, width: clip.w, height: clip.h });
-  let contacts = A.detectStrokes(seq, { hand, shot: 'auto' });
+  let contacts = A.detectStrokes(seq, { hand, shot: 'auto', view });
   let relaxed = false;
-  if (!contacts.length) { contacts = A.detectStrokes(seq, { hand, shot: 'auto', sensitivity: 2.5, relative: 0.3 }); relaxed = true; }
+  if (!contacts.length) { contacts = A.detectStrokes(seq, { hand, shot: 'auto', view, sensitivity: 2.5, relative: 0.3 }); relaxed = true; }
   if (!contacts.length) return null;
   const v = A.speedSeries(seq.frames, hand === 'L' ? 9 : 10, 30, A.torsoLength(seq.frames));
   const contact = contacts.reduce((b, c) => (v[c] > v[b] ? c : b));

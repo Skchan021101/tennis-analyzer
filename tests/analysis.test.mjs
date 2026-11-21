@@ -110,10 +110,30 @@ test('tracking glitches and small movements are not strokes', () => {
   assert.deepEqual(A.detectStrokes(A.buildSequence(flick, { fps: 30 }), { hand: 'R', shot: 'auto' }), []);
 });
 
-test('two real swings close together are counted once each', () => {
+test('two swings in a rally are counted once each', () => {
+  // Swing, hold the finish briefly, recover to the ready position over half a
+  // second, swing again: contacts about 2.3 s apart, as in a fast rally.
   const one = makeDemoSamples('pro');
-  const dur = one[one.length - 1].t + 1 / 30;
-  const two = [...one, ...one.map((s) => ({ t: s.t + dur, kps: s.kps }))];
-  const seq = A.buildSequence(two, { fps: 30 });
-  assert.equal(A.detectStrokes(seq, { hand: 'R', shot: 'auto' }).length, 2);
+  const end = one[one.length - 1], start = one[0];
+  const recover = [];
+  for (let k = 1; k <= 24; k++) {
+    const f = Math.max(0, (k - 9) / 15); // 0.3 s hold, then 0.5 s back to ready
+    recover.push({ t: end.t + k / 30, kps: end.kps.map((p, j) => [p[0] + (start.kps[j][0] - p[0]) * f, p[1] + (start.kps[j][1] - p[1]) * f, p[2]]) });
+  }
+  const shift = recover[recover.length - 1].t + 1 / 30;
+  const seqAll = [...one, ...recover, ...one.map((s) => ({ t: s.t + shift, kps: s.kps }))];
+  const seq = A.buildSequence(seqAll, { fps: 30 });
+  const found = A.detectStrokes(seq, { hand: 'R', shot: 'auto' });
+  assert.equal(found.length, 2, `found ${found}`);
+  assert.ok(Math.abs((found[1] - found[0]) / 30 - shift) < 0.1);
+});
+
+test('a preparation movement just before the hit is not counted as its own stroke', () => {
+  const v = Array(120).fill(0);
+  const bump = (at, h) => { for (let k = -4; k <= 4; k++) v[at + k] = Math.max(v[at + k], h * (1 - Math.abs(k) / 5)); };
+  bump(30, 9); // fast take-back / toss
+  bump(60, 8); // the hit, 1.0 s later and a little slower
+  assert.deepEqual(A.pickStrokes([30, 60], v, 48, 30), [60]);
+  // A follow-through peak right after contact keeps the faster one.
+  assert.deepEqual(A.pickStrokes([60, 70], v.map((x, i) => (i === 70 ? 6 : x)), 48, 30), [60]);
 });

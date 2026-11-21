@@ -103,6 +103,7 @@ function buildSetup() {
   }));
   $('view-select').addEventListener('change', (e) => {
     state.view = e.target.value; prefs.view = state.view; savePrefs();
+    if (state.live) state.live.config.view = state.view;
     // The shot recogniser depends on the camera angle, so re-check the stroke on screen.
     const c = state.current;
     if (c && c.source !== 'demo') {
@@ -423,8 +424,8 @@ async function analyzeClipFile(file) {
       fps: 30, timeScale, signal: clipAbort.signal,
       onProgress: (i, n) => setProgress('', `Tracking the player: frame ${i} of ${n}`, i / n),
     });
-    let strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot });
-    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, sensitivity: 2.5, relative: 0.3 });
+    let strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, view: state.view });
+    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, view: state.view, sensitivity: 2.5, relative: 0.3 });
     hideProgress('');
     if (state.clip?.video) URL.revokeObjectURL(state.clip.video.src);
     const items = strokes.map((contact) => {
@@ -501,7 +502,7 @@ async function startLive() {
   try {
     const est = await getEstimator('lightning');
     const session = new LiveSession($('live-video'), $('live-overlay'));
-    session.config = { hand: state.hand, shot: state.shot, sensitivity: +$('live-sensitivity').value || 1 };
+    session.config = { hand: state.hand, shot: state.shot, sensitivity: +$('live-sensitivity').value || 1, view: state.view };
     session.addEventListener('frame', (e) => drawLiveOverlay(e.detail));
     session.addEventListener('stroke', (e) => onLiveStroke(e.detail));
     session.addEventListener('error', (e) => showMessage($('analyze-message'), `Pose tracking error: ${e.detail.message}`, 'error'));
@@ -823,8 +824,9 @@ $('ref-input').addEventListener('change', async (e) => {
       fps: 30, timeScale, signal: refAbort.signal,
       onProgress: (i, n) => setProgress('ref-', `Tracking the player: frame ${i} of ${n}`, i / n),
     });
-    let strokes = A.detectStrokes(res.seq, { hand, shot });
-    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand, shot, sensitivity: 2.5, relative: 0.3 });
+    const refView = $('ref-view').value;
+    let strokes = A.detectStrokes(res.seq, { hand, shot, view: refView });
+    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand, shot, view: refView, sensitivity: 2.5, relative: 0.3 });
     hideProgress('ref-');
     if (!strokes.length) { showMessage($('ref-message'), 'No swing was found. Check the whole body is visible and "Plays" is set correctly.', 'error'); return; }
     const items = strokes.map((contact) => {
@@ -988,8 +990,8 @@ async function importClip(file, filePath, opts, est, signal, onProgress) {
     if (video.duration > 90) return { status: 'skip', text: 'Longer than 90 s' };
     const res = await processClip(video, est, { fps: 30, timeScale: opts.timeScale, signal, onProgress });
     const hint = named || 'auto';
-    let contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint });
-    if (!contacts.length) contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, sensitivity: 2.5, relative: 0.3 });
+    let contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, view: opts.view });
+    if (!contacts.length) contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, view: opts.view, sensitivity: 2.5, relative: 0.3 });
     if (!contacts.length) return { status: 'fail', text: 'No swing found' };
     // One reference per clip: the strongest stroke.
     const v = A.speedSeries(res.seq.frames, opts.hand === 'L' ? 9 : 10, res.seq.fps, A.torsoLength(res.seq.frames));
