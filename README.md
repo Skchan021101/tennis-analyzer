@@ -9,6 +9,12 @@ with TensorFlow.js.
 
 ## What it does
 
+- **Automatic shot recognition.** Each swing is labelled as a forehand, two- or one-handed
+  backhand, slice, serve, forehand or backhand volley, or overhead, using body cues only. Examples:
+  hands together through contact means a two-handed backhand; the free hand still on the throat at
+  the end of the take-back means a backhand; the hand above the head at contact means a serve or
+  overhead. The comparison then uses the reference for that shot. Picking a shot yourself overrides
+  the detection, and also corrects a misread stroke.
 - **Live camera.** Point the camera at the student and start hitting. Each swing is detected
   automatically and scored a moment later. The last 8 strokes of the session stay one tap away.
 - **Clips.** Upload a video, or record one with the phone's camera app. All strokes in the clip are
@@ -16,6 +22,12 @@ with TensorFlow.js.
   speed so timing and hand-speed numbers are correct.
 - **Pro library.** Add reference strokes from pro footage you have the right to use, or your own
   demonstrations. "Save as pro reference" turns any analyzed stroke into a reference.
+- **Bulk import.** Choose a whole folder (desktop) or several clips at once (phones too). Each clip
+  gives one reference, its strongest stroke. With Auto-detect, folder or file names such as
+  `forehand`, `backhand2hands`, `backhand_slice`, `volley`, `serve` or `smash` set the shot;
+  otherwise it's detected from the swing.
+- **Closest match.** When a shot has several references, each stroke is compared with all of them
+  (same camera angle where possible) and scored against the most similar one.
 - **Comparison.**
   - The two strokes are lined up phase by phase (preparation or trophy, contact, finish), so a
     slower student swing still matches the pro's at each phase.
@@ -28,6 +40,23 @@ with TensorFlow.js.
   shot.
 - **History.** Save analyses per student to track progress. Export and import the library and
   history as a JSON file to move them to another device or share them with another coach.
+
+## Reference clips from the THETIS dataset
+
+[THETIS](https://github.com/THETIS-dataset/dataset) is a public research dataset: 55 players (p32–p55
+are the experienced ones) performing 12 strokes, filmed from the front, without a ball. Its videos
+are AVI files that browsers can't play, so convert them first with the included script. It needs
+`git` and `ffmpeg`; on Windows, use Git Bash.
+
+```bash
+tools/get-thetis.sh thetis-mp4 32-55 1
+```
+
+That downloads take 1 of every experienced player (about 260 clips, roughly 90 MB as MP4) into
+`thetis-mp4/<shot>/`. Then in the app: **Pro library**, set Shot to **Auto-detect**, Camera angle to
+**Front**, and choose **Import a folder** → `thetis-mp4`. Film students from the front too, so they
+match. Forehand slice is skipped because the app doesn't analyze it. Please cite the THETIS authors,
+and check with them before any commercial use.
 
 ## Filming tips
 
@@ -92,6 +121,11 @@ The measurements are 2D, taken from one camera:
 
 - **One player in frame.** The model tracks the most prominent person, so keep other players out
   of the shot.
+- **Shot recognition is rule-based**, tuned on generated strokes, not on real footage. It needs the
+  whole body in view. Forehand/backhand topspin vs slice is the least reliable call. If it guesses
+  wrong, pick the shot by hand.
+- **Checkpoints need visible joints.** A checkpoint is skipped when the joints it measures weren't
+  clearly seen, for example knees out of frame.
 - **The racquet isn't tracked.** Contact is estimated from the hand-speed peak, and you can
   correct it by hand.
 - **Rough targets.** Guide ranges are rough coaching targets, not research norms. A reference clip

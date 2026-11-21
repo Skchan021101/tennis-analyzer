@@ -135,7 +135,7 @@ export const METRICS = {
 // back, 'trophy' = deepest knee bend before the swing).
 export const SHOTS = [
   {
-    id: 'forehand', name: 'Forehand', pre: 1.1, post: 0.7, minSpeed: 4, prep: 'takeback',
+    id: 'forehand', short: 'Forehand', name: 'Forehand', pre: 1.1, post: 0.7, minSpeed: 4, prep: 'takeback',
     phases: ['Unit turn', 'Contact', 'Finish'],
     metrics: {
       loadKnee: [115, 155], contactElbow: [100, 175], contactHeight: [0.3, 1.2],
@@ -145,7 +145,7 @@ export const SHOTS = [
     film: 'Side-on, level with the hitting hip, 4–6 m away, whole body in frame.',
   },
   {
-    id: 'backhand2', name: 'Backhand (two-handed)', pre: 1.1, post: 0.7, minSpeed: 4, prep: 'takeback',
+    id: 'backhand2', short: '2H backhand', name: 'Backhand (two-handed)', pre: 1.1, post: 0.7, minSpeed: 4, prep: 'takeback',
     phases: ['Unit turn', 'Contact', 'Finish'],
     metrics: {
       loadKnee: [115, 155], contactElbow: [110, 175], contactHeight: [0.3, 1.2],
@@ -155,7 +155,7 @@ export const SHOTS = [
     film: 'Side-on, level with the front hip, 4–6 m away, whole body in frame.',
   },
   {
-    id: 'backhand1', name: 'Backhand (one-handed)', pre: 1.1, post: 0.7, minSpeed: 4, prep: 'takeback',
+    id: 'backhand1', short: '1H backhand', name: 'Backhand (one-handed)', pre: 1.1, post: 0.7, minSpeed: 4, prep: 'takeback',
     phases: ['Unit turn', 'Contact', 'Finish'],
     metrics: {
       loadKnee: [115, 155], contactElbow: [150, 180], contactHeight: [0.3, 1.2],
@@ -165,7 +165,7 @@ export const SHOTS = [
     film: 'Side-on, level with the front hip, 4–6 m away, whole body in frame.',
   },
   {
-    id: 'slice', name: 'Slice backhand', pre: 1.1, post: 0.7, minSpeed: 3, prep: 'takeback',
+    id: 'slice', short: 'Slice', name: 'Slice backhand', pre: 1.1, post: 0.7, minSpeed: 3, prep: 'takeback',
     phases: ['Preparation', 'Contact', 'Extension'],
     metrics: {
       loadKnee: [120, 160], contactElbow: [140, 180], contactHeight: [0.3, 1.2],
@@ -175,7 +175,7 @@ export const SHOTS = [
     film: 'Side-on, level with the front hip, 4–6 m away, whole body in frame.',
   },
   {
-    id: 'serve', name: 'Serve', pre: 1.8, post: 0.7, minSpeed: 4, prep: 'trophy',
+    id: 'serve', short: 'Serve', name: 'Serve', pre: 1.8, post: 0.7, minSpeed: 4, prep: 'trophy',
     phases: ['Trophy', 'Contact', 'Follow-through'],
     metrics: {
       loadKnee: [100, 145], tossArm: [1.8, 3.0], contactElbow: [155, 180],
@@ -184,7 +184,7 @@ export const SHOTS = [
     film: 'Side-on from the hitting-arm side, or from behind the baseline. Leave room above the head for the toss.',
   },
   {
-    id: 'fhVolley', name: 'Forehand volley', pre: 0.6, post: 0.4, minSpeed: 2.5, prep: 'takeback',
+    id: 'fhVolley', short: 'FH volley', name: 'Forehand volley', pre: 0.6, post: 0.4, minSpeed: 2.5, prep: 'takeback',
     phases: ['Set', 'Contact', 'Punch'],
     metrics: {
       loadKnee: [120, 165], contactElbow: [100, 165], contactHeight: [0.2, 1.6],
@@ -193,7 +193,7 @@ export const SHOTS = [
     film: 'Side-on at the net post, 3–5 m away, whole body in frame.',
   },
   {
-    id: 'bhVolley', name: 'Backhand volley', pre: 0.6, post: 0.4, minSpeed: 2.5, prep: 'takeback',
+    id: 'bhVolley', short: 'BH volley', name: 'Backhand volley', pre: 0.6, post: 0.4, minSpeed: 2.5, prep: 'takeback',
     phases: ['Set', 'Contact', 'Punch'],
     metrics: {
       loadKnee: [120, 165], contactElbow: [110, 175], contactHeight: [0.2, 1.6],
@@ -202,7 +202,7 @@ export const SHOTS = [
     film: 'Side-on at the net post, 3–5 m away, whole body in frame.',
   },
   {
-    id: 'overhead', name: 'Overhead', pre: 1.3, post: 0.6, minSpeed: 4, prep: 'trophy',
+    id: 'overhead', short: 'Overhead', name: 'Overhead', pre: 1.3, post: 0.6, minSpeed: 4, prep: 'trophy',
     phases: ['Set', 'Contact', 'Follow-through'],
     metrics: {
       tossArm: [1.5, 3.0], loadKnee: [110, 160], contactElbow: [150, 180],
@@ -213,6 +213,11 @@ export const SHOTS = [
 ];
 
 export const SHOT_BY_ID = Object.fromEntries(SHOTS.map((s) => [s.id, s]));
+
+// Capture window used when the shot type is detected automatically: long
+// enough for a serve, sensitive enough for a volley.
+export const AUTO = { id: 'auto', name: 'Auto-detect', pre: 1.8, post: 0.7, minSpeed: 3, film: 'Side-on, level with the hips, 4–6 m away, whole body in frame (with room above the head for serves).' };
+export const shotConfig = (id) => SHOT_BY_ID[id] || AUTO;
 
 export const VIEWS = [
   { id: 'side', name: 'Side-on' },
@@ -233,4 +238,26 @@ export function formatMetric(key, value) {
 export function metricCopy(key, shotId, dir) {
   const m = METRICS[key];
   return (m.byShot && m.byShot[shotId] && m.byShot[shotId][dir]) || m[dir];
+}
+
+// Guess the shot from a file or folder name, e.g. THETIS folders such as
+// "backhand2hands", "forehand_flat" or "smash". Returns a shot id, the string
+// 'unsupported' for shots the app doesn't analyze (forehand slice), or null.
+export function shotFromName(path) {
+  // THETIS file names use short forms (p40_foreflat_s1, p12_bvolley_s2…).
+  const ABBR = { backhand2h: 'backhand 2hands', bslice: 'backhand slice', bvolley: 'backhand volley', fvolley: 'forehand volley', foreflat: 'forehand', foreopen: 'forehand', fslice: 'forehand slice', serflat: 'serve', serkick: 'serve', serslice: 'serve' };
+  const s = ` ${String(path).toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').map((w) => ABBR[w] || w).join(' ')} `;
+  const has = (re) => re.test(s);
+  const back = has(/ (backhand|bh)/) || has(/backhand/);
+  const fore = has(/ (forehand|fh)/) || has(/forehand/);
+  if (has(/volley/)) return back ? 'bhVolley' : fore ? 'fhVolley' : null;
+  if (has(/serv(e|ice|ing)?\b|serve/)) return 'serve';
+  if (has(/smash|overhead/)) return 'overhead';
+  if (back && has(/2 ?hands?|two ?hand|2h\b|double/)) return 'backhand2';
+  if (has(/ (bh ?2|2 ?bh) /)) return 'backhand2';
+  if (back && has(/slice/)) return 'slice';
+  if (fore && has(/slice/)) return 'unsupported';
+  if (back) return 'backhand1';
+  if (fore) return 'forehand';
+  return null;
 }

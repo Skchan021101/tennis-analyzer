@@ -66,7 +66,11 @@ function skeleton(p) {
 }
 
 export function makeDemoSamples(kind = 'pro', fps = 30) {
-  const keys = kind === 'pro' ? PRO : STUDENT;
+  return samplesFromKeys(kind === 'pro' ? PRO : STUDENT, fps);
+}
+
+// Build pose samples from keyframes ({t, hipX, lean, rx, hx, legR, legL, armR, armL}).
+export function samplesFromKeys(keys, fps = 30) {
   const end = keys[keys.length - 1].t;
   const out = [];
   for (let i = 0; i <= Math.round(end * fps); i++) {
