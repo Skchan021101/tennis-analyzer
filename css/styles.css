@@ -170,7 +170,9 @@ select { padding-right: 32px; }
 .pill.ready { background: #1d7f48; }
 .pill.warn { background: #9a6512; }
 .pill-quiet { background: rgba(0,0,0,0.4); font-weight: 500; }
-.live-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.live-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.live-controls .field.inline { margin-left: auto; }
+.live-controls .field.inline select { width: auto; }
 .hint { color: var(--muted); font-size: 0.92rem; }
 
 /* ---------- progress / messages ---------- */

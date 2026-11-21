@@ -1,6 +1,6 @@
 // Getting poses out of video: uploaded/recorded clips and the live camera.
 
-import { buildSequence, speedSeries, torsoLength, bodyVisible, cutStroke } from './analysis.js';
+import { buildSequence, speedSeries, torsoLength, bodyVisible, cutStroke, strokeQuality, MIN_STROKE_GAP } from './analysis.js';
 import { shotConfig } from './shots.js';
 
 const FRAME_MAX_DIM = 480;
@@ -116,6 +116,7 @@ export class LiveSession extends EventTarget {
     this.fpsEstimate = 0;
     this.config = { hand: 'R', shot: 'forehand', sensitivity: 1 };
     this.retained = new Map(); // bitmap -> number of captured strokes using it
+    this.recentPeaks = []; // hand-speed peaks of the last few strokes
   }
 
   static supported() {
@@ -229,21 +230,30 @@ export class LiveSession extends EventTarget {
     const v = speedSeries(seq.frames, wri, fps, torso);
     const tOf = (i) => seq.t0 + i / fps;
     const half = Math.round(0.35 * fps);
-    const minSpeed = cfg.minSpeed / this.config.sensitivity;
+    // After a few swings, a stroke must also be at least 40% as fast as this
+    // player's typical swing, which filters out slower in-between movements.
+    let minSpeed = cfg.minSpeed / this.config.sensitivity;
+    if (this.recentPeaks.length >= 3) {
+      const sorted = [...this.recentPeaks].sort((x, y) => x - y);
+      minSpeed = Math.max(minSpeed, (0.4 / this.config.sensitivity) * sorted[sorted.length >> 1]);
+    }
     let best = -1;
     for (let i = 0; i < v.length; i++) {
       const ti = tOf(i);
       if (ti > now - cfg.post || ti < now - cfg.post - 0.5) continue;
-      if (ti < this.lastContactT + 1.0) continue;
+      if (ti < this.lastContactT + MIN_STROKE_GAP) continue;
       if (v[i] < minSpeed || !bodyVisible(seq.frames[i])) continue;
       let isMax = true;
       for (let k = Math.max(0, i - half); k <= Math.min(v.length - 1, i + half); k++) if (v[k] > v[i]) { isMax = false; break; }
       if (isMax && (best < 0 || v[i] > v[best])) best = i;
     }
     if (best < 0) return;
+    if (!strokeQuality(seq, best, { hand: this.config.hand, torso, v }).ok) return;
     const tc = tOf(best);
     if (tc - cfg.pre < this.buffer[0].t - 0.05) return; // not enough lead-in recorded yet
     this.lastContactT = tc;
+    this.recentPeaks.push(v[best]);
+    if (this.recentPeaks.length > 7) this.recentPeaks.shift();
 
     // Build the stroke from the samples around contact.
     const raw = this.buffer.filter((s) => s.t >= tc - cfg.pre - 0.1 && s.t <= tc + cfg.post + 0.1);

@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { StrokeViewer } from './viewer.js';
 import { makeDemoSamples, DEMO_SIZE } from './demo.js';
 
-const APP_VERSION = 'Version 3 · auto-detect, bulk import';
+const APP_VERSION = 'Version 4 · cleaner stroke detection';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
@@ -272,6 +272,7 @@ async function renderCurrent() {
   $('example-note').hidden = !isDemo;
   $('save-session').hidden = isDemo;
   $('save-as-ref').hidden = isDemo;
+  $('discard-stroke').hidden = c.source !== 'live';
   $('save-ref-form').hidden = true;
   document.querySelector('.result .contact-adjust').hidden = isDemo;
 
@@ -466,7 +467,7 @@ async function startLive() {
   try {
     const est = await getEstimator('lightning');
     const session = new LiveSession($('live-video'), $('live-overlay'));
-    session.config = { hand: state.hand, shot: state.shot, sensitivity: 1 };
+    session.config = { hand: state.hand, shot: state.shot, sensitivity: +$('live-sensitivity').value || 1 };
     session.addEventListener('frame', (e) => drawLiveOverlay(e.detail));
     session.addEventListener('stroke', (e) => onLiveStroke(e.detail));
     session.addEventListener('error', (e) => showMessage($('analyze-message'), `Pose tracking error: ${e.detail.message}`, 'error'));
@@ -486,6 +487,13 @@ async function startLive() {
 
 // Captured strokes keep their frames after the camera stops, so they can
 // still be reviewed; they're freed when a clip replaces them.
+// Free one captured stroke's frames, keeping any shared with other strokes.
+function releaseLiveEntry(entry) {
+  if (state.live) { state.live.release(entry.bitmaps); return; }
+  const inUse = new Set(state.liveStrokes.filter((s) => s !== entry).flatMap((s) => s.bitmaps));
+  new Set(entry.bitmaps).forEach((b) => { if (!inUse.has(b)) b.close?.(); });
+}
+
 function releaseLiveStrokes() {
   const bitmaps = new Set(state.liveStrokes.flatMap((s) => s.bitmaps));
   if (state.live) state.liveStrokes.forEach((s) => state.live.release(s.bitmaps));
@@ -559,6 +567,24 @@ function selectLiveStroke(i) {
 
 $('live-start').addEventListener('click', startLive);
 $('live-stop').addEventListener('click', stopLive);
+if (['0.75', '1', '1.4'].includes(String(prefs.sensitivity))) $('live-sensitivity').value = String(prefs.sensitivity);
+$('live-sensitivity').addEventListener('change', (e) => {
+  prefs.sensitivity = +e.target.value; savePrefs();
+  if (state.live) state.live.config.sensitivity = +e.target.value;
+});
+$('discard-stroke').addEventListener('click', () => {
+  const c = state.current;
+  if (!c || c.source !== 'live') return;
+  const i = state.liveStrokes.findIndex((s) => s.current === c);
+  if (i < 0) return;
+  releaseLiveEntry(state.liveStrokes[i]);
+  state.liveStrokes.splice(i, 1);
+  if (state.liveStrokes.length) { selectLiveStroke(Math.min(i, state.liveStrokes.length - 1)); return; }
+  state.current = null;
+  $('result').hidden = true;
+  $('stroke-strip').hidden = true;
+  refreshSetup();
+});
 $('live-flip').addEventListener('click', async () => {
   if (!state.live) return;
   try {

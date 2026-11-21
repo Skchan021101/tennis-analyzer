@@ -186,6 +186,47 @@ export function speedSeries(frames, kp, fps, torso) {
 }
 
 // ---------- stroke detection ----------
+export const MIN_STROKE_GAP = 1.2; // seconds between two strokes
+
+// Does a hand-speed peak look like a real swing? Rejects tracking glitches
+// (a point jumping for a frame or two), small movements (adjusting the grip,
+// bouncing the ball) and out-and-back jitter.
+export function strokeQuality(seq, contact, { hand = 'R', torso = null, v = null } = {}) {
+  const { frames, fps } = seq;
+  const n = frames.length;
+  torso = torso || torsoLength(frames);
+  const { wri } = handIdx(hand);
+  v = v || speedSeries(frames, wri, fps, torso);
+  const peak = v[contact];
+  // 1. The hand stays fast for a moment, not a single-frame spike.
+  let a = contact, b = contact;
+  while (a > 0 && v[a - 1] >= 0.5 * peak) a--;
+  while (b < n - 1 && v[b + 1] >= 0.5 * peak) b++;
+  const fastFrames = b - a + 1;
+  // 2. It travels far enough around contact (relative to the hips).
+  const rel = (i) => [frames[i][wri][0] - (frames[i][11][0] + frames[i][12][0]) / 2, frames[i][wri][1] - (frames[i][11][1] + frames[i][12][1]) / 2];
+  const from = Math.max(1, contact - Math.round(0.4 * fps)), to = Math.min(n - 1, contact + Math.round(0.3 * fps));
+  let travel = 0;
+  for (let i = from; i <= to; i++) travel += dist(rel(i), rel(i - 1)) / torso;
+  // 3. Through contact it keeps going one way instead of jumping out and back.
+  const c0 = Math.max(0, contact - Math.round(0.12 * fps)), c1 = Math.min(n - 1, contact + Math.round(0.12 * fps));
+  let path = 0;
+  for (let i = c0 + 1; i <= c1; i++) path += dist(rel(i), rel(i - 1));
+  const straightness = path > 0 ? dist(rel(c1), rel(c0)) / path : 0;
+  // 4. The hand was actually seen, not guessed.
+  const seenFrom = Math.max(0, contact - Math.round(0.2 * fps)), seenTo = Math.min(n - 1, contact + Math.round(0.2 * fps));
+  let conf = 0;
+  for (let i = seenFrom; i <= seenTo; i++) conf += frames[i][wri][2];
+  conf /= seenTo - seenFrom + 1;
+
+  const reasons = [];
+  if (fastFrames < Math.max(3, Math.round(0.08 * fps))) reasons.push('spike');
+  if (travel < 0.7) reasons.push('small'); // a volley punch is short
+  if (straightness < 0.6) reasons.push('jitter');
+  if (conf < 0.25) reasons.push('unseen');
+  return { ok: reasons.length === 0, reasons, peak, fastFrames, travel, straightness, conf };
+}
+
 // Returns contact frame indices (peaks of hitting-hand speed).
 export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity = 1, relative = 0.4 } = {}) {
   const cfg = shotConfig(shot);
@@ -197,7 +238,7 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
   const peak = Math.max(...v);
   const thresh = Math.max(cfg.minSpeed / sensitivity, peak * relative);
   const half = Math.max(2, Math.round(0.35 * fps));
-  const gap = Math.round(0.9 * fps);
+  const gap = Math.round(MIN_STROKE_GAP * fps);
   const candidates = [];
   for (let i = 1; i < v.length - 1; i++) {
     if (v[i] < thresh) continue;
@@ -205,7 +246,7 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
     for (let k = Math.max(0, i - half); k <= Math.min(v.length - 1, i + half); k++) {
       if (v[k] > v[i] || (v[k] === v[i] && k < i)) { isMax = false; break; }
     }
-    if (isMax && bodyVisible(frames[i])) candidates.push(i);
+    if (isMax && bodyVisible(frames[i]) && strokeQuality(seq, i, { hand, torso, v }).ok) candidates.push(i);
   }
   // Strongest peaks win; a weaker peak close to a stronger one (for example
   // the take-back just before the forward swing) is dropped.

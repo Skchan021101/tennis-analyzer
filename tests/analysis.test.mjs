@@ -93,3 +93,27 @@ test('running across the court without swinging is not a stroke', () => {
   const seq = A.buildSequence(samples, { fps: 30 });
   assert.deepEqual(A.detectStrokes(seq, { hand: 'R', shot: 'forehand' }), []);
 });
+
+test('tracking glitches and small movements are not strokes', () => {
+  const base = makeDemoSamples('pro')[0].kps;
+  // Standing still with the hand jumping away for one frame (a tracking glitch).
+  const glitch = Array.from({ length: 60 }, (_, i) => ({
+    t: i / 30,
+    kps: base.map((p, j) => (j === 10 && i === 30 ? [p[0] + 120, p[1] - 60, 0.4] : p)),
+  }));
+  assert.deepEqual(A.detectStrokes(A.buildSequence(glitch, { fps: 30 }), { hand: 'R', shot: 'auto' }), []);
+  // A quick small flick of the hand (e.g. adjusting the grip).
+  const flick = Array.from({ length: 60 }, (_, i) => ({
+    t: i / 30,
+    kps: base.map((p, j) => (j === 10 ? [p[0] + 25 * Math.exp(-(((i - 30) / 2) ** 2)), p[1], p[2]] : p)),
+  }));
+  assert.deepEqual(A.detectStrokes(A.buildSequence(flick, { fps: 30 }), { hand: 'R', shot: 'auto' }), []);
+});
+
+test('two real swings close together are counted once each', () => {
+  const one = makeDemoSamples('pro');
+  const dur = one[one.length - 1].t + 1 / 30;
+  const two = [...one, ...one.map((s) => ({ t: s.t + dur, kps: s.kps }))];
+  const seq = A.buildSequence(two, { fps: 30 });
+  assert.equal(A.detectStrokes(seq, { hand: 'R', shot: 'auto' }).length, 2);
+});

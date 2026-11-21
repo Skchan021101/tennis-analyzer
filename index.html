@@ -102,6 +102,14 @@
           <button type="button" class="btn btn-secondary" id="live-pause" aria-pressed="false">Pause detection</button>
           <button type="button" class="btn btn-secondary" id="live-flip">Switch camera</button>
           <button type="button" class="btn btn-ghost" id="live-stop">Stop camera</button>
+          <label class="field inline">
+            <span class="label">Swing detection</span>
+            <select id="live-sensitivity">
+              <option value="0.75">Strict (fewer false strokes)</option>
+              <option value="1" selected>Normal</option>
+              <option value="1.4">Sensitive (slow or short swings)</option>
+            </select>
+          </label>
         </div>
         <p class="hint">Each swing is detected automatically and scored below. Keep the whole body in the frame.</p>
       </div>
@@ -171,6 +179,7 @@
             <div class="result-actions">
               <button type="button" class="btn btn-primary" id="save-session">Save to history</button>
               <button type="button" class="btn btn-secondary" id="save-as-ref">Save as pro reference</button>
+              <button type="button" class="btn btn-danger" id="discard-stroke">Discard this stroke</button>
             </div>
             <div class="inline-form" id="save-ref-form" hidden>
               <label class="field"><span class="label">Reference name</span><input id="save-ref-name" maxlength="60" placeholder="e.g. Coach demo forehand"></label>
