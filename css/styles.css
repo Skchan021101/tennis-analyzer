@@ -301,6 +301,8 @@ select { padding-right: 32px; }
 .bulk-list .fail .mark { color: var(--work); }
 .bulk-list .skip .mark, .bulk-list .wait .mark { color: var(--muted); }
 .library-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.starter { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; justify-content: space-between; }
+.starter > div { flex: 1 1 320px; min-width: 0; display: grid; gap: 6px; }
 .ref-list { display: grid; gap: 20px; }
 .ref-group h2 { font-size: 1.3rem; margin-bottom: 10px; }
 .ref-group h2 .count { font: 600 0.9rem/1 var(--font-body); color: var(--muted); margin-left: 6px; }

@@ -1133,6 +1133,24 @@ $('ref-list').addEventListener('click', async (e) => {
   }
 });
 
+$('starter-btn').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  showMessage($('library-message'), 'Adding starter references…');
+  try {
+    const res = await fetch('library/starter.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`the file could not be loaded (${res.status})`);
+    const r = await store.importAll(await res.json());
+    await store.requestPersistence();
+    await reloadData();
+    refAnalyses.clear();
+    renderLibrary();
+    showMessage($('library-message'), `Added ${r.refs} starter references. Strokes are now compared with the closest one for the shot and camera angle.`, 'ok');
+  } catch (err) {
+    showMessage($('library-message'), `Couldn't add the starter references: ${err.message}. Check the connection and try again.`, 'error');
+  } finally { btn.disabled = false; }
+});
+
 $('export-btn').addEventListener('click', async () => {
   try {
     const data = await store.exportAll();
