@@ -681,3 +681,20 @@ export function strokeFeatures(stroke, hand = 'R') {
   return f.map((x) => (Number.isFinite(x) ? x : 0));
 }
 const hip0 = (p) => mid(p[11], p[12]);
+
+// Apply a softmax shot model ({classes, mu, sd, W}) to a feature vector.
+// Returns the most likely shot, its probability and all probabilities.
+export function predictShot(model, x) {
+  const D = model.mu.length;
+  const z = model.W.map((w) => {
+    let s = w[D];
+    for (let j = 0; j < D; j++) s += ((x[j] - model.mu[j]) / model.sd[j]) * w[j];
+    return s;
+  });
+  const mx = Math.max(...z);
+  const ex = z.map((v) => Math.exp(v - mx));
+  const se = ex.reduce((a, b) => a + b, 0);
+  const p = ex.map((v) => v / se);
+  const k = p.indexOf(Math.max(...p));
+  return { shot: model.classes[k], confidence: p[k], probs: Object.fromEntries(model.classes.map((c, i) => [c, p[i]])) };
+}
