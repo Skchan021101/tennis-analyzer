@@ -321,6 +321,7 @@ select { padding-right: 32px; }
 .history-row { display: grid; grid-template-columns: 56px 64px minmax(0, 1fr) auto; gap: 12px; align-items: center; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 12px; }
 .history-row img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; background: var(--stage); }
 .history-score { font: 700 1.8rem/1 var(--font-display); text-align: center; }
+.history-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; }
 .history-score small { display: block; font: 500 0.7rem/1.2 var(--font-body); color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
 .history-main { min-width: 0; display: grid; gap: 2px; }
 .history-title { font-weight: 600; }
@@ -328,7 +329,7 @@ select { padding-right: 32px; }
 @media (max-width: 520px) {
   .history-row { grid-template-columns: 48px 52px minmax(0, 1fr); }
   .history-row img { width: 48px; height: 48px; }
-  .history-row .btn-danger { grid-column: 1 / -1; justify-self: end; }
+  .history-row .history-actions { grid-column: 1 / -1; }
   .viewer-panels { gap: 6px; }
 }
 

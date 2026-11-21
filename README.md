@@ -47,8 +47,10 @@ with TensorFlow.js.
     out because a single camera can't measure them from there.
 - **Without a reference,** the same checkpoints are checked against rough guide ranges for each
   shot.
-- **History.** Save analyses per student to track progress. Export and import the library and
-  history as a JSON file to move them to another device or share them with another coach.
+- **History.** Save analyses per student to track progress. Each saved stroke keeps its movement,
+  and its video unless "Keep the video when saving" is turned off (about 1–2 MB per stroke), so
+  **Replay** in History reopens it frame by frame with the comparison. Export and import the library
+  and history as a JSON file to move them to another device or share them with another coach.
 
 ## Shot recognition
 

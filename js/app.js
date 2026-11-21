@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { StrokeViewer } from './viewer.js';
 import { makeDemoSamples, DEMO_SIZE } from './demo.js';
 
-const APP_VERSION = 'Version 6 · trained shot recognition, starter references';
+const APP_VERSION = 'Version 7 · replay saved strokes';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
@@ -296,12 +296,14 @@ async function renderCurrent() {
     }
     c.refUsed = ref || null;
   }
-  const studentLabel = isDemo ? 'Demo student' : (state.student || 'Student');
+  const studentLabel = isDemo ? 'Demo student' : (c.student || state.student || 'Student');
   const studentSide = { analysis: c.analysis, frames: c.stroke.frames, width: c.width, height: c.height, images: c.images, label: studentLabel };
 
   $('result').hidden = false;
   $('example-note').hidden = !isDemo;
-  $('save-session').hidden = isDemo;
+  // A stroke opened from history is already saved.
+  $('save-session').hidden = isDemo || c.source === 'history';
+  $('keep-video-row').hidden = isDemo || c.source === 'history' || !c.full?.images?.length;
   $('save-as-ref').hidden = isDemo;
   $('discard-stroke').hidden = c.source !== 'live';
   $('save-ref-form').hidden = true;
@@ -330,8 +332,8 @@ async function renderCurrent() {
     num.className = 'score-num small';
     ring.setAttribute('aria-label', `${evalRes.onTarget} of ${evalRes.rated} checkpoints on target`);
   }
-  const auto = !isDemo && state.shot === 'auto';
-  $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : 'Clip'} · ${new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}${auto ? ' · Shot detected automatically' : ''}`;
+  const auto = !isDemo && state.shot === 'auto' && !c.manualShot; // not after a manual fix or for a saved stroke
+  $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : c.source === 'history' ? 'Saved' : 'Clip'} · ${c.source === 'history' ? fmtDate(c.createdAt) : new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}${auto ? ' · Shot detected automatically' : ''}`;
   $('result-title').textContent = cfg.name;
   let sub = cmp ? `Match with ${refData.label}` : `Checked against guide ranges. Add a ${cfg.name.toLowerCase()} reference in the Pro library for a match score.`;
   // When the recogniser isn't sure, offer its two best guesses as one-tap fixes.
@@ -481,7 +483,7 @@ $('clip-input').addEventListener('change', (e) => {
 
 function releaseCurrent() {
   const c = state.current;
-  if (c && c.source === 'clip' && c.full?.images) c.full.images.forEach((b) => b.close?.());
+  if (c && (c.source === 'clip' || c.source === 'history') && c.full?.images) c.full.images.forEach((b) => b.close?.());
   if (state.liveStrokes.length) releaseLiveStrokes();
 }
 
@@ -765,6 +767,14 @@ $('save-session').addEventListener('click', async () => {
     onTarget: c.evaluation.onTarget, rated: c.evaluation.rated,
     metrics: c.analysis.metrics, tips: c.evaluation.tips.map((t) => t.text),
     thumb: await contactThumb(c),
+    // The stroke itself, so it can be reopened frame by frame: the whole
+    // capture window (so the shot can still be changed), and its video.
+    manualShot: !!c.manualShot,
+    stroke: {
+      frames: roundFrames(c.full.stroke.frames), fps: c.full.stroke.fps, contact: c.full.stroke.contact,
+      width: c.width, height: c.height,
+    },
+    images: $('keep-video').checked && c.full.images?.length ? await bitmapsToBlobs(c.full.images) : [],
   };
   try {
     await store.put('sessions', rec);
@@ -774,6 +784,35 @@ $('save-session').addEventListener('click', async () => {
     showMessage($('analyze-message'), `Saved to ${rec.student}'s history.`, 'ok');
   } catch (e) { showMessage($('analyze-message'), `Couldn't save: ${e.message}`, 'error'); }
 });
+
+if (prefs.keepVideo === false) $('keep-video').checked = false;
+$('keep-video').addEventListener('change', (e) => { prefs.keepVideo = e.target.checked; savePrefs(); });
+
+// Reopen a saved stroke on the Analyze page, frame by frame.
+async function openSession(rec) {
+  if (!rec?.stroke) return;
+  stopLive();
+  releaseCurrent();
+  state.clip = null;
+  $('stroke-strip').hidden = true;
+  // Analyse it as it was recorded: same camera angle and hand.
+  state.view = rec.view || state.view;
+  state.hand = rec.hand === 'L' ? 'L' : 'R';
+  $('view-select').value = state.view;
+  $(`hand-${state.hand.toLowerCase()}`).checked = true;
+  let images = null;
+  try { images = rec.images?.length ? await blobsToBitmaps(rec.images) : null; } catch { images = null; }
+  const full = { ...rec.stroke, offset: 0, t0: 0 };
+  const c = { source: 'history', createdAt: rec.createdAt, full: { stroke: full, images }, width: rec.stroke.width, height: rec.stroke.height, student: rec.student, sessionId: rec.id };
+  c.detected = A.detectShot(full, { hand: state.hand, view: state.view });
+  c.manualShot = true; // keep the shot it was saved as
+  applyShot(c, SHOT_BY_ID[rec.shot] ? rec.shot : c.detected.shot);
+  state.current = c;
+  location.hash = '#analyze';
+  await renderCurrent();
+  showMessage($('analyze-message'), `Opened ${rec.student}'s ${SHOT_BY_ID[c.shot].name.toLowerCase()} from ${fmtDate(rec.createdAt)}${images ? '' : ' (saved without video: the skeleton replays)'}. It is compared with your current references, so the score can differ from the one saved.`, 'ok');
+  viewer.jumpTo('contact');
+}
 
 $('save-as-ref').addEventListener('click', () => {
   $('save-ref-form').hidden = false;
@@ -1208,12 +1247,22 @@ function renderHistory() {
         <div class="history-title">${esc(SHOT_BY_ID[s.shot]?.name || s.shot)} · ${esc(s.student)}</div>
         <div class="history-meta">${fmtDate(s.createdAt)} · ${s.refLabel ? `vs ${esc(s.refLabel)}` : 'guide ranges'}${s.tips?.length ? ` · ${esc(s.tips[0])}` : ''}</div>
       </div>
-      <button type="button" class="btn btn-danger btn-small" data-act="delete">Delete</button>
+      <div class="history-actions">
+        ${s.stroke ? `<button type="button" class="btn btn-secondary btn-small" data-act="open">${s.images?.length ? 'Replay' : 'Replay skeleton'}</button>` : '<span class="history-meta" title="Saved before replay was available">Result only</span>'}
+        <button type="button" class="btn btn-danger btn-small" data-act="delete">Delete</button>
+      </div>
     </div>`;
   }).join('');
 }
 $('history-filter').addEventListener('change', renderHistory);
 $('history-list').addEventListener('click', async (e) => {
+  const open = e.target.closest('[data-act="open"]');
+  if (open) {
+    open.disabled = true;
+    await openSession(state.sessions.find((s) => s.id === open.closest('.history-row').dataset.id));
+    open.disabled = false;
+    return;
+  }
   const btn = e.target.closest('[data-act="delete"]');
   if (!btn) return;
   if (btn.dataset.confirm !== '1') {
