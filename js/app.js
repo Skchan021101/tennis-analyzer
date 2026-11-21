@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { StrokeViewer } from './viewer.js';
 import { makeDemoSamples, DEMO_SIZE } from './demo.js';
 
-const APP_VERSION = 'Version 4 · cleaner detection, live swing overlay';
+const APP_VERSION = 'Version 5 · shot recognition trained on real strokes';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
@@ -97,11 +97,19 @@ function buildSetup() {
     if (state.live) state.live.config.hand = state.hand;
     const c = state.current;
     if (c && c.source !== 'demo') {
-      c.detected = A.detectShot(c.full.stroke, { hand: state.hand });
-      setCurrentShot(state.shot === 'auto' ? c.detected.shot : c.shot);
+      c.detected = A.detectShot(c.full.stroke, { hand: state.hand, view: state.view });
+      setCurrentShot(state.shot === 'auto' && !c.manualShot ? c.detected.shot : c.shot);
     }
   }));
-  $('view-select').addEventListener('change', (e) => { state.view = e.target.value; prefs.view = state.view; savePrefs(); refreshSetup(); });
+  $('view-select').addEventListener('change', (e) => {
+    state.view = e.target.value; prefs.view = state.view; savePrefs();
+    // The shot recogniser depends on the camera angle, so re-check the stroke on screen.
+    const c = state.current;
+    if (c && c.source !== 'demo') {
+      c.detected = A.detectShot(c.full.stroke, { hand: state.hand, view: state.view });
+      setCurrentShot(state.shot === 'auto' && !c.manualShot ? c.detected.shot : c.shot);
+    } else refreshSetup();
+  });
   $('ref-select').addEventListener('change', (e) => {
     const shot = effectiveShot();
     if (shot) prefs.refByShot = { ...(prefs.refByShot || {}), [shot]: e.target.value || 'none' };
@@ -227,7 +235,7 @@ function analyzeCurrent() {
 // the shot type changes (a serve needs more lead-in than a volley).
 function buildCurrent(source, full, images, width, height, extra = {}) {
   const c = { source, createdAt: Date.now(), full: { stroke: full, images }, width, height, ...extra };
-  c.detected = A.detectShot(full, { hand: state.hand });
+  c.detected = A.detectShot(full, { hand: state.hand, view: state.view });
   applyShot(c, state.shot === 'auto' ? c.detected.shot : state.shot);
   return c;
 }
@@ -246,6 +254,22 @@ function setCurrentShot(shot) {
   applyShot(c, shot);
   renderCurrent();
 }
+
+$('shot-pick').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-pick]');
+  const c = state.current;
+  if (!b || !c) return;
+  c.manualShot = true; // corrected by hand: stop asking for this stroke
+  setCurrentShot(b.dataset.pick);
+  const entry = state.liveStrokes.find((x) => x.current === c);
+  if (entry) {
+    if (entry.tallied && state.liveTally[entry.tallied]) state.liveTally[entry.tallied]--;
+    state.liveTally[c.shot] = (state.liveTally[c.shot] || 0) + 1;
+    entry.tallied = c.shot;
+    renderTally();
+    renderLiveChips(state.liveStrokes.indexOf(entry));
+  }
+});
 
 async function renderCurrent() {
   const c = state.current;
@@ -304,7 +328,13 @@ async function renderCurrent() {
   $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : 'Clip'} · ${new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}${auto ? ' · Shot detected automatically' : ''}`;
   $('result-title').textContent = cfg.name;
   let sub = cmp ? `Match with ${refData.label}` : `Checked against guide ranges. Add a ${cfg.name.toLowerCase()} reference in the Pro library for a match score.`;
-  if (auto && c.detected.confidence < 0.65) sub += ' · Not certain about the shot type. If it\'s wrong, pick the right shot above.';
+  // When the recogniser isn't sure, offer its two best guesses as one-tap fixes.
+  const pick = $('shot-pick');
+  const unsure = auto && !c.manualShot && !c.detected.sure;
+  pick.hidden = !unsure;
+  if (unsure) {
+    pick.innerHTML = `<span>Not sure which shot this is:</span>${c.detected.alternatives.map((a) => `<button type="button" class="chip" data-pick="${a.shot}" aria-pressed="${a.shot === c.shot}">${esc(SHOT_BY_ID[a.shot].name)}</button>`).join('')}<span class="pick-hint">or choose any shot above</span>`;
+  }
   if (c.analysis.handSwapped) sub += ` · The hitting arm looked like the ${c.analysis.hand === 'L' ? 'left' : 'right'} one; check the "Plays" setting.`;
   if (!isDemo && c.analysis.legsHidden) sub += ' · The legs weren\'t clearly in view, so the knee and stance checks were skipped. Move the camera back so the whole body is in frame.';
   if (!isDemo && c.analysis.armHidden) sub += ' · The hitting arm was hard to track, so arm checks may be missing. Try better light or a faster frame rate.';
@@ -399,7 +429,7 @@ async function analyzeClipFile(file) {
     if (state.clip?.video) URL.revokeObjectURL(state.clip.video.src);
     const items = strokes.map((contact) => {
       const full = A.cutStroke(res.seq, contact, 'auto');
-      return { contact, full, detected: A.detectShot(full, { hand: state.hand }) };
+      return { contact, full, detected: A.detectShot(full, { hand: state.hand, view: state.view }) };
     });
     state.clip = { video, ...res, strokes, items, timeScale };
     if (!strokes.length) {
@@ -509,7 +539,7 @@ function releaseLiveStrokes() {
 
 function renderLiveChips(active) {
   $('stroke-strip-label').textContent = 'This session';
-  $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === active}">#${k + 1}${x.current ? ` ${esc(SHOT_BY_ID[x.current.shot].short)}` : ''}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
+  $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === active}">#${k + 1}${x.current ? ` ${esc(SHOT_BY_ID[x.current.shot].short)}${state.shot === 'auto' && !x.current.manualShot && !x.current.detected.sure ? '?' : ''}` : ''}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
   $('stroke-strip').hidden = !state.liveStrokes.length;
 }
 
@@ -584,7 +614,8 @@ function onLiveStroke({ stroke, bitmaps, width, height }) {
 let bannerTimer = null;
 function showSwingBanner(c) {
   const b = $('live-banner');
-  $('lb-shot').textContent = SHOT_BY_ID[c.shot].name;
+  const unsure = state.shot === 'auto' && !c.manualShot && !c.detected.sure;
+  $('lb-shot').textContent = `${SHOT_BY_ID[c.shot].name}${unsure ? '?' : ''}`;
   $('lb-score').textContent = c.comparison ? `Match ${c.comparison.score}` : `${c.evaluation.onTarget}/${c.evaluation.rated} on target`;
   const top = c.evaluation.tips[0];
   $('lb-tip').textContent = top ? `Work on: ${METRICS[top.key].short.toLowerCase()}` : (c.evaluation.rated ? 'Nice one' : '');
@@ -798,7 +829,7 @@ $('ref-input').addEventListener('change', async (e) => {
     if (!strokes.length) { showMessage($('ref-message'), 'No swing was found. Check the whole body is visible and "Plays" is set correctly.', 'error'); return; }
     const items = strokes.map((contact) => {
       const full = A.cutStroke(res.seq, contact, 'auto');
-      const detected = A.detectShot(full, { hand });
+      const detected = A.detectShot(full, { hand, view: $('ref-view').value });
       return { contact, full, shot: shot === 'auto' ? detected.shot : shot };
     });
     if (refDraft.clip?.video) URL.revokeObjectURL(refDraft.clip.video.src);
@@ -964,7 +995,7 @@ async function importClip(file, filePath, opts, est, signal, onProgress) {
     const v = A.speedSeries(res.seq.frames, opts.hand === 'L' ? 9 : 10, res.seq.fps, A.torsoLength(res.seq.frames));
     const contact = contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
     const full = A.cutStroke(res.seq, contact, 'auto');
-    const shot = named || A.detectShot(full, { hand: opts.hand }).shot;
+    const shot = named || A.detectShot(full, { hand: opts.hand, view: opts.view }).shot;
     const { range, stroke } = A.recut(full, shot);
     const analysis = A.analyzeStroke(stroke, { shot, hand: opts.hand });
     let images = null;

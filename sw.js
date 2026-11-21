@@ -1,6 +1,6 @@
 // Offline cache so the app keeps working courtside with a weak connection.
 // Bump with each release so old caches are dropped.
-const CACHE = 'stroke-match-v4';
+const CACHE = 'stroke-match-v5';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png',
   'js/app.js', 'js/analysis.js', 'js/shotmodel.js', 'js/capture.js', 'js/demo.js', 'js/pose.js', 'js/shots.js', 'js/store.js', 'js/viewer.js',

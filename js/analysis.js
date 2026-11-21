@@ -3,7 +3,7 @@
 // Pure functions only (no DOM), so they run in the browser and in Node tests.
 
 import { SHOT_BY_ID, METRICS, metricCopy, formatMetric, shotConfig } from './shots.js';
-import { SHOT_MODEL } from './shotmodel.js';
+import { SHOT_MODELS } from './shotmodel.js';
 
 // MoveNet keypoint order (anatomical left/right of the player).
 export const KP = {
@@ -712,12 +712,18 @@ export function predictShot(model, x) {
   return { shot: model.classes[k], confidence: p[k], probs: Object.fromEntries(model.classes.map((c, i) => [c, p[i]])) };
 }
 
-// Recognise the shot type of a captured stroke window. Uses the model trained
-// on real strokes (js/shotmodel.js); falls back to the hand-written rules.
-export function detectShot(stroke, { hand = 'R' } = {}) {
-  if (SHOT_MODEL) {
-    const r = predictShot(SHOT_MODEL, strokeFeatures(stroke, hand));
-    return { shot: r.shot, confidence: r.confidence, probs: r.probs, method: 'model' };
+// Recognise the shot type of a captured stroke window with the model for the
+// camera angle (js/shotmodel.js, trained on real strokes). Below this
+// confidence the app asks instead of stating a shot: on players left out of
+// training, strokes above it were right 81-89% of the time, those below 40-54%.
+export const SURE = 0.7;
+export function detectShot(stroke, { hand = 'R', view = 'side' } = {}) {
+  const model = SHOT_MODELS && (SHOT_MODELS[view] || SHOT_MODELS.side);
+  if (model) {
+    const r = predictShot(model, strokeFeatures(stroke, hand));
+    const alternatives = Object.entries(r.probs).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([shot, p]) => ({ shot, p }));
+    return { shot: r.shot, confidence: r.confidence, sure: r.confidence >= SURE, alternatives, method: 'model' };
   }
-  return { ...classifyStroke(stroke, { hand }), method: 'rules' };
+  const rule = classifyStroke(stroke, { hand });
+  return { ...rule, sure: false, alternatives: [{ shot: rule.shot, p: rule.confidence }], method: 'rules' };
 }
