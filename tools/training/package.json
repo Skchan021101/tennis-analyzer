@@ -1,0 +1,11 @@
+{
+  "name": "stroke-match-training",
+  "private": true,
+  "type": "module",
+  "description": "Rebuild Stroke Match's shot recognisers and starter references from open tennis datasets.",
+  "dependencies": {
+    "@tensorflow/tfjs-backend-wasm": "4.22.0",
+    "@tensorflow/tfjs-converter": "4.22.0",
+    "@tensorflow/tfjs-core": "4.22.0"
+  }
+}
