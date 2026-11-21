@@ -210,7 +210,7 @@ export class StrokeViewer {
       const img = side.images[Math.max(0, Math.min(side.images.length - 1, Math.round(idx)))];
       const k = Math.min(W / img.width, H / img.height);
       const dw = img.width * k, dh = img.height * k, ox = (W - dw) / 2, oy = (H - dh) / 2;
-      ctx.drawImage(img, ox, oy, dw, dh);
+      try { ctx.drawImage(img, ox, oy, dw, dh); } catch { /* frame no longer available; still draw the skeleton */ }
       const sx = dw / side.width;
       tf = (p) => [ox + p[0] * sx, oy + p[1] * sx];
     } else {

@@ -1,4 +1,4 @@
-import { SHOTS, SHOT_BY_ID, VIEWS } from './shots.js';
+import { SHOTS, SHOT_BY_ID, VIEWS, AUTO } from './shots.js';
 import * as A from './analysis.js';
 import { createEstimator } from './pose.js';
 import { openVideo, processClip, extractFrames, bitmapsToBlobs, blobsToBitmaps, LiveSession } from './capture.js';
@@ -18,7 +18,7 @@ const prefs = (() => { try { return JSON.parse(localStorage.getItem(PREF_KEY)) |
 const savePrefs = () => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch { /* ignore */ } };
 
 const state = {
-  shot: SHOT_BY_ID[prefs.shot] ? prefs.shot : 'forehand',
+  shot: SHOT_BY_ID[prefs.shot] ? prefs.shot : 'auto', // 'auto' = detect the shot type
   hand: prefs.hand === 'L' ? 'L' : 'R',
   view: VIEWS.some((v) => v.id === prefs.view) ? prefs.view : 'side',
   student: prefs.student || '',
@@ -71,32 +71,38 @@ window.addEventListener('hashchange', route);
 
 // ---------- setup form ----------
 function buildSetup() {
-  $('shot-chips').innerHTML = SHOTS.map((s) => `
-    <label class="chip"><input type="radio" name="shot" value="${s.id}" ${s.id === state.shot ? 'checked' : ''}>${esc(s.name)}</label>`).join('');
+  $('shot-chips').innerHTML = [AUTO, ...SHOTS].map((s) => `
+    <label class="chip${s.id === 'auto' ? ' chip-auto' : ''}"><input type="radio" name="shot" value="${s.id}" ${s.id === state.shot ? 'checked' : ''}>${esc(s.name)}</label>`).join('');
   const viewOpts = VIEWS.map((v) => `<option value="${v.id}">${v.name}</option>`).join('');
   $('view-select').innerHTML = viewOpts;
   $('view-select').value = state.view;
   $('ref-view').innerHTML = viewOpts;
-  $('ref-shot').innerHTML = SHOTS.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
-  $('ref-shot').value = state.shot;
+  $('ref-shot').innerHTML = [AUTO, ...SHOTS].map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  $('ref-shot').value = 'auto';
   $(`hand-${state.hand.toLowerCase()}`).checked = true;
   $('student-name').value = state.student;
 
   $('shot-chips').addEventListener('change', (e) => {
     state.shot = e.target.value; prefs.shot = state.shot; savePrefs();
-    $('ref-shot').value = state.shot;
-    refreshSetup();
     if (state.live) state.live.config.shot = state.shot;
-    reanalyzeCurrent();
+    const c = state.current;
+    // Picking a shot also corrects the one on screen; Auto goes back to the detected one.
+    if (c && c.source !== 'demo') setCurrentShot(state.shot === 'auto' ? c.detected.shot : state.shot);
+    else refreshSetup();
   });
   document.querySelectorAll('input[name="hand"]').forEach((r) => r.addEventListener('change', () => {
     state.hand = r.value; prefs.hand = state.hand; savePrefs();
     if (state.live) state.live.config.hand = state.hand;
-    reanalyzeCurrent();
+    const c = state.current;
+    if (c && c.source !== 'demo') {
+      c.detected = A.classifyStroke(c.full.stroke, { hand: state.hand });
+      setCurrentShot(state.shot === 'auto' ? c.detected.shot : c.shot);
+    }
   }));
   $('view-select').addEventListener('change', (e) => { state.view = e.target.value; prefs.view = state.view; savePrefs(); refreshSetup(); });
   $('ref-select').addEventListener('change', (e) => {
-    prefs.refByShot = { ...(prefs.refByShot || {}), [state.shot]: e.target.value || 'none' };
+    const shot = effectiveShot();
+    if (shot) prefs.refByShot = { ...(prefs.refByShot || {}), [shot]: e.target.value || 'none' };
     savePrefs();
     renderCurrent();
   });
@@ -111,19 +117,35 @@ function selectedRef() {
   return id ? state.refs.find((r) => r.id === id) || null : null;
 }
 
+// The shot being worked on: the one on screen, else the chosen one (null
+// while auto-detecting with nothing captured yet).
+function effectiveShot() {
+  const c = state.current;
+  if (c && c.source !== 'demo') return c.shot;
+  return state.shot === 'auto' ? null : state.shot;
+}
+
 function refreshSetup() {
-  const cfg = SHOT_BY_ID[state.shot];
-  $('film-tip').innerHTML = `<strong>Filming ${esc(cfg.name.toLowerCase())}:</strong> ${esc(cfg.film)}`;
-  const refs = refsForShot(state.shot);
+  const shot = effectiveShot();
+  const cfg = shot ? SHOT_BY_ID[shot] : AUTO;
+  $('film-tip').innerHTML = state.shot === 'auto' && !shot
+    ? `<strong>Filming any shot:</strong> ${esc(AUTO.film)} The shot type is detected for each swing.`
+    : `<strong>Filming ${esc(cfg.name.toLowerCase())}:</strong> ${esc(cfg.film)}`;
   const sel = $('ref-select');
+  if (!shot) {
+    sel.innerHTML = '<option value="">Matched to each detected shot</option>';
+    sel.disabled = true;
+  } else sel.disabled = false;
+  const names = new Set(state.sessions.map((s) => s.student).filter(Boolean));
+  $('student-list').innerHTML = [...names].sort().map((n) => `<option value="${esc(n)}"></option>`).join('');
+  if (!shot) return;
+  const refs = refsForShot(shot);
   sel.innerHTML = refs.map((r) => `<option value="${r.id}">${esc(r.label)} · ${viewName(r.view)}${r.view !== state.view ? ' (different angle)' : ''}</option>`).join('')
-    + '<option value="">Guide ranges only (no reference)</option>';
-  const pref = prefs.refByShot?.[state.shot];
+    + `<option value="">${refs.length ? 'Guide ranges only (no reference)' : `No ${esc(cfg.name.toLowerCase())} reference yet: guide ranges`}</option>`;
+  const pref = prefs.refByShot?.[shot];
   if (pref === 'none') sel.value = '';
   else if (pref && refs.some((r) => r.id === pref)) sel.value = pref;
   else sel.value = (refs.find((r) => r.view === state.view) || refs[0])?.id || '';
-  const names = new Set(state.sessions.map((s) => s.student).filter(Boolean));
-  $('student-list').innerHTML = [...names].sort().map((n) => `<option value="${esc(n)}"></option>`).join('');
 }
 
 // ---------- reference helpers ----------
@@ -155,12 +177,30 @@ function setCurrent(cur) {
 function analyzeCurrent() {
   const c = state.current;
   if (!c || c.source === 'demo') return;
-  c.analysis = A.analyzeStroke(c.stroke, { shot: state.shot, hand: state.hand });
+  c.analysis = A.analyzeStroke(c.stroke, { shot: c.shot, hand: state.hand });
 }
 
-function reanalyzeCurrent() {
-  if (!state.current || state.current.source === 'demo') return;
-  analyzeCurrent();
+// A captured stroke keeps its full capture window, so it can be re-cut when
+// the shot type changes (a serve needs more lead-in than a volley).
+function buildCurrent(source, full, images, width, height, extra = {}) {
+  const c = { source, createdAt: Date.now(), full: { stroke: full, images }, width, height, ...extra };
+  c.detected = A.classifyStroke(full, { hand: state.hand });
+  applyShot(c, state.shot === 'auto' ? c.detected.shot : state.shot);
+  return c;
+}
+
+function applyShot(c, shot) {
+  c.shot = shot;
+  const { range, stroke } = A.recut(c.full.stroke, shot);
+  c.stroke = stroke;
+  c.images = c.full.images ? c.full.images.slice(range[0], range[1] + 1) : null;
+  c.analysis = A.analyzeStroke(c.stroke, { shot, hand: state.hand });
+}
+
+function setCurrentShot(shot) {
+  const c = state.current;
+  if (!c || c.source === 'demo') return;
+  applyShot(c, shot);
   renderCurrent();
 }
 
@@ -168,8 +208,9 @@ async function renderCurrent() {
   const c = state.current;
   if (!c) { $('result').hidden = true; return; }
   const isDemo = c.source === 'demo';
-  const shotId = isDemo ? 'forehand' : state.shot;
+  const shotId = isDemo ? 'forehand' : c.shot;
   const cfg = SHOT_BY_ID[shotId];
+  refreshSetup();
   let refData = null;
   if (isDemo) refData = c.demoRef;
   else {
@@ -187,7 +228,8 @@ async function renderCurrent() {
   document.querySelector('.result .contact-adjust').hidden = isDemo;
 
   const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, refData?.label || 'the pro');
-  const cmp = refData ? A.compareStrokes(c.analysis, refData.analysis) : null;
+  let cmp = refData ? A.compareStrokes(c.analysis, refData.analysis) : null;
+  if (cmp && cmp.score == null) cmp = null; // nothing comparable was tracked
   c.evaluation = evalRes;
   c.comparison = cmp;
 
@@ -207,10 +249,14 @@ async function renderCurrent() {
     num.className = 'score-num small';
     ring.setAttribute('aria-label', `${evalRes.onTarget} of ${evalRes.rated} checkpoints on target`);
   }
-  $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : 'Clip'} · ${new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}`;
+  const auto = !isDemo && state.shot === 'auto';
+  $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : 'Clip'} · ${new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}${auto ? ' · Shot detected automatically' : ''}`;
   $('result-title').textContent = cfg.name;
-  let sub = cmp ? `Match with ${refData.label}` : 'Checked against guide ranges. Add a pro reference for a match score.';
+  let sub = cmp ? `Match with ${refData.label}` : `Checked against guide ranges. Add a ${cfg.name.toLowerCase()} reference in the Pro library for a match score.`;
+  if (auto && c.detected.confidence < 0.65) sub += ' · Not certain about the shot type. If it\'s wrong, pick the right shot above.';
   if (c.analysis.handSwapped) sub += ` · The hitting arm looked like the ${c.analysis.hand === 'L' ? 'left' : 'right'} one; check the "Plays" setting.`;
+  if (!isDemo && c.analysis.legsHidden) sub += ' · The legs weren\'t clearly in view, so the knee and stance checks were skipped. Move the camera back so the whole body is in frame.';
+  if (!isDemo && c.analysis.armHidden) sub += ' · The hitting arm was hard to track, so arm checks may be missing. Try better light or a faster frame rate.';
   $('result-sub').textContent = sub;
 
   const pb = $('phase-bars');
@@ -219,7 +265,7 @@ async function renderCurrent() {
     pb.innerHTML = [['prep', cfg.phases[0]], ['contact', cfg.phases[1]], ['finish', cfg.phases[2]]].map(([k, name]) => {
       const v = cmp.phases[k];
       const col = v >= 75 ? 'var(--good)' : v >= 55 ? 'var(--close)' : 'var(--work)';
-      return `<dt>${esc(name)}</dt><dd><div class="track"><div class="fill" style="width:${v}%;background:${col}"></div></div></dd><dd class="num">${v}</dd>`;
+      return `<dt>${esc(name)}</dt><dd><div class="track"><div class="fill" style="width:${v ?? 0}%;background:${col}"></div></div></dd><dd class="num">${v ?? '–'}</dd>`;
     }).join('');
   } else pb.hidden = true;
 
@@ -261,9 +307,10 @@ function showDemo() {
 function nudgeContact(delta) {
   const c = state.current;
   if (!c || c.source === 'demo') return;
-  const n = c.stroke.frames.length;
-  c.stroke = { ...c.stroke, contact: Math.max(1, Math.min(n - 2, c.analysis.events.contact + delta)) };
-  analyzeCurrent();
+  const full = c.full.stroke;
+  const at = full.contact + (c.analysis.events.contact - c.stroke.contact) + delta;
+  c.full.stroke = { ...full, contact: Math.max(1, Math.min(full.frames.length - 2, at)) };
+  applyShot(c, c.shot);
   renderCurrent().then(() => viewer.jumpTo('contact'));
 }
 $('contact-prev').addEventListener('click', () => nudgeContact(-1));
@@ -299,13 +346,17 @@ async function analyzeClipFile(file) {
     if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, sensitivity: 2.5, relative: 0.3 });
     hideProgress('');
     if (state.clip?.video) URL.revokeObjectURL(state.clip.video.src);
-    state.clip = { video, ...res, strokes, timeScale };
+    const items = strokes.map((contact) => {
+      const full = A.cutStroke(res.seq, contact, 'auto');
+      return { contact, full, detected: A.classifyStroke(full, { hand: state.hand }) };
+    });
+    state.clip = { video, ...res, strokes, items, timeScale };
     if (!strokes.length) {
       showMessage($('analyze-message'), 'No swing was found in this clip. Check that the whole body is in the frame, the "Plays" setting matches the student, and the clip includes the full stroke.', 'error');
       return;
     }
     $('stroke-strip-label').textContent = strokes.length === 1 ? '1 stroke found' : `${strokes.length} strokes found`;
-    $('stroke-chips').innerHTML = strokes.map((c, i) => `<button type="button" class="chip" data-i="${i}" aria-pressed="${i === 0}">Stroke ${i + 1} · ${fmtTime(c / res.seq.fps + res.seq.t0)}</button>`).join('');
+    $('stroke-chips').innerHTML = items.map((it, i) => `<button type="button" class="chip" data-i="${i}" aria-pressed="${i === 0}">${i + 1} · ${state.shot === 'auto' ? `${esc(SHOT_BY_ID[it.detected.shot].short)} · ` : ''}${fmtTime(it.contact / res.seq.fps + res.seq.t0)}</button>`).join('');
     $('stroke-strip').hidden = false;
     await selectClipStroke(0);
   } catch (e) {
@@ -318,14 +369,12 @@ async function selectClipStroke(i) {
   const clip = state.clip;
   if (!clip) return;
   $('stroke-chips').querySelectorAll('.chip').forEach((b) => b.setAttribute('aria-pressed', String(+b.dataset.i === i)));
-  const stroke = A.cutStroke(clip.seq, clip.strokes[i], state.shot);
+  const { full } = clip.items[i];
   setProgress('', 'Preparing frames…', 0.5);
-  const times = stroke.frames.map((_, k) => clip.videoTime(stroke.offset + k));
-  const images = await extractFrames(clip.video, times);
+  const images = await extractFrames(clip.video, full.frames.map((_, k) => clip.videoTime(full.offset + k)));
   hideProgress('');
   releaseCurrent();
-  state.current = { source: 'clip', createdAt: Date.now(), stroke, images, width: clip.width, height: clip.height };
-  analyzeCurrent();
+  state.current = buildCurrent('clip', full, images, clip.width, clip.height);
   await renderCurrent();
 }
 $('stroke-chips').addEventListener('click', (e) => {
@@ -343,7 +392,8 @@ $('clip-input').addEventListener('change', (e) => {
 
 function releaseCurrent() {
   const c = state.current;
-  if (c && c.source === 'clip' && c.images) c.images.forEach((b) => b.close?.());
+  if (c && c.source === 'clip' && c.full?.images) c.full.images.forEach((b) => b.close?.());
+  if (state.liveStrokes.length) releaseLiveStrokes();
 }
 
 // ---------- live camera ----------
@@ -359,8 +409,9 @@ async function startLive() {
     return;
   }
   if (state.live) return;
-  $('stroke-strip').hidden = true;
   state.clip = null;
+  if (state.liveStrokes.length) renderLiveChips(state.current?.liveIndex ?? -1);
+  else $('stroke-strip').hidden = true;
   $('live').hidden = false;
   $('live-status').textContent = 'Loading the pose model…';
   $('live-status').className = 'pill';
@@ -385,16 +436,28 @@ async function startLive() {
   }
 }
 
+// Captured strokes keep their frames after the camera stops, so they can
+// still be reviewed; they're freed when a clip replaces them.
+function releaseLiveStrokes() {
+  const bitmaps = new Set(state.liveStrokes.flatMap((s) => s.bitmaps));
+  if (state.live) state.liveStrokes.forEach((s) => state.live.release(s.bitmaps));
+  else bitmaps.forEach((b) => b.close?.());
+  state.liveStrokes = [];
+}
+
+function renderLiveChips(active) {
+  $('stroke-strip-label').textContent = 'This session';
+  $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === active}">#${k + 1}${x.current ? ` ${esc(SHOT_BY_ID[x.current.shot].short)}` : ''}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
+  $('stroke-strip').hidden = !state.liveStrokes.length;
+}
+
 function stopLive() {
   if (!state.live) { $('live').hidden = true; return; }
-  for (const s of state.liveStrokes) state.live.release(s.bitmaps);
-  state.liveStrokes = [];
   state.live.stop();
   state.live = null;
   $('live').hidden = true;
   try { wakeLock?.release(); } catch { /* ignore */ }
   wakeLock = null;
-  if (state.current?.source === 'live') { $('stroke-strip').hidden = true; }
 }
 
 function drawLiveOverlay({ kps, w, h, visible }) {
@@ -415,7 +478,7 @@ function drawLiveOverlay({ kps, w, h, visible }) {
   const st = $('live-status');
   const paused = !state.live?.detecting;
   if (paused) { st.textContent = 'Detection paused'; st.className = 'pill'; }
-  else if (visible) { st.textContent = `Tracking · ready for a ${SHOT_BY_ID[state.shot].name.toLowerCase()}`; st.className = 'pill ready'; }
+  else if (visible) { st.textContent = `Tracking · ready for ${state.shot === 'auto' ? 'any stroke' : `a ${SHOT_BY_ID[state.shot].name.toLowerCase()}`}`; st.className = 'pill ready'; }
   else { st.textContent = 'Step into view: whole body in the frame'; st.className = 'pill warn'; }
   const fps = state.live?.fpsEstimate;
   $('live-fps').textContent = fps ? `${Math.round(fps)} fps` : '';
@@ -423,8 +486,7 @@ function drawLiveOverlay({ kps, w, h, visible }) {
 }
 
 function onLiveStroke({ stroke, bitmaps, width, height }) {
-  const analysis = A.analyzeStroke(stroke, { shot: state.shot, hand: state.hand });
-  const entry = { stroke, bitmaps, width, height, analysis, createdAt: Date.now() };
+  const entry = { full: stroke, bitmaps, width, height, createdAt: Date.now() };
   state.liveStrokes.push(entry);
   while (state.liveStrokes.length > 8) {
     const old = state.liveStrokes.shift();
@@ -436,16 +498,14 @@ function onLiveStroke({ stroke, bitmaps, width, height }) {
 function selectLiveStroke(i) {
   const s = state.liveStrokes[i];
   if (!s) return;
-  state.current = { source: 'live', createdAt: s.createdAt, stroke: s.stroke, images: s.bitmaps, width: s.width, height: s.height, analysis: s.analysis, liveIndex: i };
-  analyzeCurrent();
-  s.stroke = state.current.stroke;
+  if (!s.current) s.current = buildCurrent('live', s.full, s.bitmaps, s.width, s.height, { createdAt: s.createdAt });
+  s.current.liveIndex = i;
+  state.current = s.current;
   renderCurrent().then(() => {
-    s.score = state.current.comparison?.score;
-    $('stroke-strip-label').textContent = 'This session';
-    $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === i}">#${k + 1}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
-    $('stroke-strip').hidden = false;
+    s.score = s.current.comparison?.score;
+    renderLiveChips(i);
     const st = $('live-status');
-    if (st) { st.textContent = `Stroke ${i + 1} captured${s.score != null ? ` · match ${s.score}` : ''}`; st.className = 'pill ready'; }
+    if (st) { st.textContent = `Stroke ${i + 1}: ${SHOT_BY_ID[s.current.shot].name}${s.score != null ? ` · match ${s.score}` : ''}`; st.className = 'pill ready'; }
   });
 }
 
@@ -488,7 +548,7 @@ $('save-session').addEventListener('click', async () => {
   if (!c || c.source === 'demo') return;
   const ref = selectedRef();
   const rec = {
-    id: store.newId('ses'), createdAt: Date.now(), student: state.student || 'Student', shot: state.shot,
+    id: store.newId('ses'), createdAt: Date.now(), student: state.student || 'Student', shot: c.shot,
     hand: c.analysis.hand, view: state.view, source: c.source,
     refId: ref?.id || null, refLabel: ref?.label || null,
     score: c.comparison?.score ?? null, phases: c.comparison?.phases || null,
@@ -507,7 +567,7 @@ $('save-session').addEventListener('click', async () => {
 
 $('save-as-ref').addEventListener('click', () => {
   $('save-ref-form').hidden = false;
-  $('save-ref-name').value = `${state.student || 'Coach'} · ${SHOT_BY_ID[state.shot].name}`;
+  $('save-ref-name').value = `${state.student || 'Coach'} · ${SHOT_BY_ID[state.current.shot].name}`;
   $('save-ref-name').focus();
 });
 $('save-ref-cancel').addEventListener('click', () => { $('save-ref-form').hidden = true; });
@@ -515,7 +575,7 @@ $('save-ref-confirm').addEventListener('click', async () => {
   const c = state.current;
   if (!c) return;
   await saveReference({
-    shot: state.shot, label: $('save-ref-name').value.trim() || SHOT_BY_ID[state.shot].name,
+    shot: c.shot, label: $('save-ref-name').value.trim() || SHOT_BY_ID[c.shot].name,
     hand: c.analysis.hand, view: state.view, stroke: c.stroke, contact: c.analysis.events.contact,
     width: c.width, height: c.height, images: c.images,
   });
@@ -565,8 +625,14 @@ $('ref-input').addEventListener('change', async (e) => {
     if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand, shot, sensitivity: 2.5, relative: 0.3 });
     hideProgress('ref-');
     if (!strokes.length) { showMessage($('ref-message'), 'No swing was found. Check the whole body is visible and "Plays" is set correctly.', 'error'); return; }
-    refDraft.clip = { video, ...res, strokes, shot, hand };
-    $('ref-stroke-chips').innerHTML = strokes.map((c, i) => `<button type="button" class="chip" data-i="${i}" aria-pressed="${i === 0}">Stroke ${i + 1} · ${fmtTime(c / res.seq.fps + res.seq.t0)}</button>`).join('');
+    const items = strokes.map((contact) => {
+      const full = A.cutStroke(res.seq, contact, 'auto');
+      const detected = A.classifyStroke(full, { hand });
+      return { contact, full, shot: shot === 'auto' ? detected.shot : shot };
+    });
+    if (refDraft.clip?.video) URL.revokeObjectURL(refDraft.clip.video.src);
+    refDraft.clip = { video, ...res, strokes, items, shot, hand };
+    $('ref-stroke-chips').innerHTML = items.map((it, i) => `<button type="button" class="chip" data-i="${i}" aria-pressed="${i === 0}">${i + 1} · ${esc(SHOT_BY_ID[it.shot].short)} · ${fmtTime(it.contact / res.seq.fps + res.seq.t0)}</button>`).join('');
     $('ref-pick').hidden = false;
     await pickRefStroke(0);
   } catch (err) {
@@ -578,19 +644,20 @@ $('ref-input').addEventListener('change', async (e) => {
 async function pickRefStroke(i) {
   const clip = refDraft.clip;
   $('ref-stroke-chips').querySelectorAll('.chip').forEach((b) => b.setAttribute('aria-pressed', String(+b.dataset.i === i)));
-  const stroke = A.cutStroke(clip.seq, clip.strokes[i], clip.shot);
-  const images = await extractFrames(clip.video, stroke.frames.map((_, k) => clip.videoTime(stroke.offset + k)));
+  const it = clip.items[i];
+  const { range, stroke } = A.recut(it.full, it.shot);
+  const images = await extractFrames(clip.video, stroke.frames.map((_, k) => clip.videoTime(it.full.offset + range[0] + k)));
   refDraft.current?.images?.forEach((b) => b.close?.());
-  refDraft.current = { stroke, images, width: clip.width, height: clip.height };
+  refDraft.current = { stroke, images, shot: it.shot, width: clip.width, height: clip.height };
   renderRefDraft();
 }
 
 function renderRefDraft() {
   const d = refDraft.current, clip = refDraft.clip;
-  d.analysis = A.analyzeStroke(d.stroke, { shot: clip.shot, hand: clip.hand });
+  d.analysis = A.analyzeStroke(d.stroke, { shot: d.shot, hand: clip.hand });
   refViewer.setData({
-    student: { analysis: d.analysis, frames: d.stroke.frames, width: d.width, height: d.height, images: d.images, label: $('ref-player').value || 'Reference' },
-    ref: null, phases: SHOT_BY_ID[clip.shot].phases,
+    student: { analysis: d.analysis, frames: d.stroke.frames, width: d.width, height: d.height, images: d.images, label: `${$('ref-player').value || 'Reference'} · ${SHOT_BY_ID[d.shot].name}` },
+    ref: null, phases: SHOT_BY_ID[d.shot].phases,
   });
 }
 
@@ -610,14 +677,14 @@ $('ref-save').addEventListener('click', async () => {
   if (!d) return;
   try {
     await saveReference({
-      shot: clip.shot, label: $('ref-player').value.trim() || `${SHOT_BY_ID[clip.shot].name} reference`,
+      shot: d.shot, label: $('ref-player').value.trim() || `${SHOT_BY_ID[d.shot].name} reference`,
       hand: d.analysis.hand, view: $('ref-view').value, stroke: d.stroke, contact: d.analysis.events.contact,
       width: d.width, height: d.height, images: d.images,
     });
     $('ref-pick').hidden = true;
     URL.revokeObjectURL(clip.video.src);
     refDraft.clip = null;
-    showMessage($('ref-message'), 'Saved. It is now available under "Compare with" for this shot.', 'ok');
+    showMessage($('ref-message'), `Saved as a ${SHOT_BY_ID[d.shot].name.toLowerCase()} reference. It is used automatically for that shot.`, 'ok');
     renderLibrary();
   } catch (e) { showMessage($('ref-message'), `Couldn't save: ${e.message}`, 'error'); }
 });
@@ -665,7 +732,7 @@ async function renderLibrary() {
             <div class="ref-card-title">${esc(r.label)}</div>
             <div class="ref-card-meta">${r.hand === 'L' ? 'Left' : 'Right'}-handed · ${viewName(r.view)} · ${fmtDate(r.createdAt)}</div>
             <div class="ref-card-actions">
-              <button type="button" class="btn btn-ghost btn-small" data-act="use">Compare with this</button>
+              <button type="button" class="btn btn-ghost btn-small" data-act="use">Use for ${esc(s.name.toLowerCase())}</button>
               <button type="button" class="btn btn-danger btn-small" data-act="delete">Delete</button>
             </div>
           </div>
@@ -686,14 +753,12 @@ $('ref-list').addEventListener('click', async (e) => {
   const id = btn.closest('.ref-card').dataset.id;
   const r = state.refs.find((x) => x.id === id);
   if (btn.dataset.act === 'use') {
-    state.shot = r.shot; prefs.shot = r.shot;
+    // Make it the reference for its shot (works with auto-detect too).
     prefs.refByShot = { ...(prefs.refByShot || {}), [r.shot]: r.id };
     savePrefs();
-    document.querySelector(`input[name="shot"][value="${r.shot}"]`).checked = true;
-    refreshSetup();
     location.hash = '#analyze';
-    reanalyzeCurrent();
     renderCurrent();
+    showMessage($('analyze-message'), `"${r.label}" is now the reference for every ${SHOT_BY_ID[r.shot].name.toLowerCase()}.`, 'ok');
   } else if (btn.dataset.act === 'delete') {
     if (btn.dataset.confirm !== '1') {
       btn.dataset.confirm = '1';

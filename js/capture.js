@@ -1,7 +1,7 @@
 // Getting poses out of video: uploaded/recorded clips and the live camera.
 
 import { buildSequence, speedSeries, torsoLength, bodyVisible, cutStroke } from './analysis.js';
-import { SHOT_BY_ID } from './shots.js';
+import { shotConfig } from './shots.js';
 
 const FRAME_MAX_DIM = 480;
 
@@ -219,7 +219,7 @@ export class LiveSession extends EventTarget {
   }
 
   detect(now) {
-    const cfg = SHOT_BY_ID[this.config.shot];
+    const cfg = shotConfig(this.config.shot);
     const fps = 30;
     const win = this.buffer.filter((s) => s.t >= now - (cfg.pre + cfg.post + 0.8));
     if (win.length < 8 || win[win.length - 1].t - win[0].t < cfg.post + 0.5) return;

@@ -9,6 +9,12 @@ with TensorFlow.js.
 
 ## What it does
 
+- **Automatic shot recognition.** Each swing is labelled as a forehand, two- or one-handed
+  backhand, slice, serve, forehand or backhand volley, or overhead, using body cues only. Examples:
+  hands together through contact means a two-handed backhand; the free hand still on the throat at
+  the end of the take-back means a backhand; the hand above the head at contact means a serve or
+  overhead. The comparison then uses the reference for that shot. Picking a shot yourself overrides
+  the detection, and also corrects a misread stroke.
 - **Live camera.** Point the camera at the student and start hitting. Each swing is detected
   automatically and scored a moment later. The last 8 strokes of the session stay one tap away.
 - **Clips.** Upload a video, or record one with the phone's camera app. All strokes in the clip are
@@ -92,6 +98,11 @@ The measurements are 2D, taken from one camera:
 
 - **One player in frame.** The model tracks the most prominent person, so keep other players out
   of the shot.
+- **Shot recognition is rule-based**, tuned on generated strokes, not on real footage. It needs the
+  whole body in view. Forehand/backhand topspin vs slice is the least reliable call. If it guesses
+  wrong, pick the shot by hand.
+- **Checkpoints need visible joints.** A checkpoint is skipped when the joints it measures weren't
+  clearly seen, for example knees out of frame.
 - **The racquet isn't tracked.** Contact is estimated from the hand-speed peak, and you can
   correct it by hand.
 - **Rough targets.** Guide ranges are rough coaching targets, not research norms. A reference clip

@@ -259,7 +259,7 @@ select { padding-right: 32px; }
 .ticks span { position: absolute; transform: translateX(-50%); font: 600 0.7rem/1 var(--font-body); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
 .ticks span::before { content: ""; position: absolute; left: 50%; top: -9px; width: 2px; height: 7px; background: var(--muted); }
 .ticks span.low { top: 14px; }
-.ticks span.low::before { top: -23px; height: 21px; }
+.ticks span.low::before { display: none; }
 .contact-adjust { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 .contact-adjust .label { margin-right: 4px; }
 

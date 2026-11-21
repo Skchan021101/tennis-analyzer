@@ -2,7 +2,7 @@
 // checkpoint metrics and comparison against a reference stroke.
 // Pure functions only (no DOM), so they run in the browser and in Node tests.
 
-import { SHOT_BY_ID, METRICS, metricCopy, formatMetric } from './shots.js';
+import { SHOT_BY_ID, METRICS, metricCopy, formatMetric, shotConfig } from './shots.js';
 
 // MoveNet keypoint order (anatomical left/right of the player).
 export const KP = {
@@ -62,15 +62,18 @@ export function fixSwaps(samples) {
     // for the other hand that happens to be near its old position.
     const pred = (j) => [2 * prev[j][0] - pp[j][0], 2 * prev[j][1] - pp[j][1]];
     for (const group of SWAP_GROUPS) {
-      let keep = 0, swap = 0, n = 0;
-      for (const [a, b] of group) {
+      let keep = 0, swap = 0, n = 0, rootSwapped = false;
+      for (const [k, [a, b]] of group.entries()) {
         if (cur[a][2] < MIN_SCORE || cur[b][2] < MIN_SCORE || prev[a][2] < MIN_SCORE || prev[b][2] < MIN_SCORE) continue;
         const pa = pred(a), pb = pred(b);
-        keep += dist(cur[a], pa) + dist(cur[b], pb);
-        swap += dist(cur[a], pb) + dist(cur[b], pa);
+        const kk = dist(cur[a], pa) + dist(cur[b], pb), ss = dist(cur[a], pb) + dist(cur[b], pa);
+        // The model flips a whole side at once, so the shoulders (or hips)
+        // must agree; hands passing close to each other are not a flip.
+        if (k === 0) rootSwapped = ss < kk * 0.7;
+        keep += kk; swap += ss;
         n++;
       }
-      if (n >= 2 && swap < keep * 0.5 && keep > 0.25 * scale * n) {
+      if (rootSwapped && n >= 2 && swap < keep * 0.5 && keep > 0.25 * scale * n) {
         for (const [a, b] of group) { const t = cur[a]; cur[a] = cur[b]; cur[b] = t; }
       }
     }
@@ -185,7 +188,7 @@ export function speedSeries(frames, kp, fps, torso) {
 // ---------- stroke detection ----------
 // Returns contact frame indices (peaks of hitting-hand speed).
 export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity = 1, relative = 0.4 } = {}) {
-  const cfg = SHOT_BY_ID[shot];
+  const cfg = shotConfig(shot);
   const { frames, fps } = seq;
   if (frames.length < 5) return [];
   const torso = torsoLength(frames);
@@ -214,7 +217,7 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
 
 // Cut a stroke window around a contact frame.
 export function cutStroke(seq, contact, shot) {
-  const cfg = SHOT_BY_ID[shot];
+  const cfg = shotConfig(shot);
   const a = Math.max(0, contact - Math.round(cfg.pre * seq.fps));
   const b = Math.min(seq.frames.length - 1, contact + Math.round(cfg.post * seq.fps));
   return {
@@ -248,6 +251,23 @@ export function canonicalize(frames, hand, dir, torso) {
   });
 }
 
+// Detection confidence of each canonical joint, per frame.
+export function canonScores(frames, hand) {
+  const ix = canonIndices(hand);
+  return frames.map((f) => {
+    const out = new Array(CANON.length);
+    out[C.head] = f[0][2];
+    for (const name of CANON.slice(1)) out[C[name]] = f[ix[name]][2];
+    return out;
+  });
+}
+
+// A joint must be seen this confidently before a checkpoint is measured from
+// it. Points below it were guessed by the model or filled in, so measuring
+// them gives nonsense such as a 12° knee.
+const SEEN = 0.3;
+const SEEN_FAST = 0.2; // the hand is blurred near contact, so allow a little less
+
 // ---------- events & metrics ----------
 function swingDirection(frames, wri, contact) {
   const n = frames.length;
@@ -280,16 +300,33 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
   contact = clamp(contact, 1, Math.max(1, n - 2));
   const dir = swingDirection(frames, wri, contact);
   const canon = canonicalize(frames, h, dir, torso);
-  const kneeAngles = canon.map((p) => Math.min(
-    angleAt(p[C.hitHip], p[C.hitKnee], p[C.hitAnk]),
-    angleAt(p[C.offHip], p[C.offKnee], p[C.offAnk]),
-  ));
+  const conf = canonScores(frames, h);
+  const seen = (i, names, thr = SEEN) => names.every((nm) => conf[i][C[nm]] >= thr);
+  const legAngle = (i, side) => {
+    const [hp, kn, an] = [`${side}Hip`, `${side}Knee`, `${side}Ank`];
+    if (!seen(i, [hp, kn, an])) return NaN;
+    const a = angleAt(canon[i][C[hp]], canon[i][C[kn]], canon[i][C[an]]);
+    return a >= 50 ? a : NaN; // tighter than this isn't a tennis knee bend
+  };
+  const kneeAngles = canon.map((_, i) => {
+    const a = [legAngle(i, 'hit'), legAngle(i, 'off')].filter(Number.isFinite);
+    return a.length ? Math.min(...a) : NaN;
+  });
+  const legFrames = canon.filter((_, i) => seen(i, ['hitKnee', 'offKnee', 'hitAnk', 'offAnk'])).length;
+  const legsHidden = legFrames < 0.5 * n;
+  const armFrames = canon.filter((_, i) => seen(i, ['hitElb', 'hitWri'], SEEN_FAST)).length;
+  const armHidden = armFrames < 0.5 * n;
 
   // End of preparation.
   let prep = 0;
   if (cfg.prep === 'trophy') {
     let best = Infinity;
     for (let i = 0; i <= contact - 2; i++) if (kneeAngles[i] < best) { best = kneeAngles[i]; prep = i; }
+    if (best === Infinity) {
+      // Legs not visible: use the pause of the hand before the drive instead.
+      let slow = Infinity;
+      for (let i = Math.max(0, contact - Math.round(0.9 * fps)); i <= contact - 3; i++) if (v[i] < slow) { slow = v[i]; prep = i; }
+    }
   } else {
     let best = Infinity;
     for (let i = 0; i <= contact - 1; i++) {
@@ -302,7 +339,8 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
   // Finish: hand slows to a quarter of its peak after contact.
   const vPeak = v[contact];
   let finish = n - 1;
-  for (let i = contact + 2; i < n; i++) if (v[i] < 0.25 * vPeak) { finish = i; break; }
+  const minFinish = contact + Math.max(2, Math.round(0.12 * fps));
+  for (let i = minFinish; i < n; i++) if (v[i] < 0.25 * vPeak) { finish = i; break; }
   finish = clamp(finish, contact + 1, n - 1);
 
   const events = { start: 0, prep, contact, finish, end: n - 1 };
@@ -318,23 +356,30 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
     return (Math.atan2(s[0], s[1]) * 180) / Math.PI;
   };
 
+  const armAtContact = seen(contact, ['hitSho', 'hitElb', 'hitWri'], SEEN_FAST);
+  const wristAtContact = seen(contact, ['hitWri'], SEEN_FAST);
+  const backFrames = range(0, contact, (i) => (seen(i, ['hitWri'], SEEN_FAST) ? canon[i][C.hitWri][0] : NaN)).filter(Number.isFinite);
+  const kneeLoad = range(loadFrom, contact, (i) => kneeAngles[i]).filter(Number.isFinite);
+  // Values outside these bounds can only come from bad tracking.
+  const within = (x, lo, hi) => (x >= lo && x <= hi ? x : NaN);
+
   const metrics = {
-    loadKnee: Math.min(...range(loadFrom, contact, (i) => kneeAngles[i]).filter(Number.isFinite)),
-    contactElbow: angleAt(pc[C.hitSho], pc[C.hitElb], pc[C.hitWri]),
-    contactHeight: pc[C.hitWri][1],
-    contactFront: pc[C.hitWri][0],
-    finishHeight: canon[finish][C.hitWri][1],
-    takeback: Math.max(0, -Math.min(...range(0, contact, (i) => canon[i][C.hitWri][0]))),
+    loadKnee: kneeLoad.length ? Math.min(...kneeLoad) : NaN,
+    contactElbow: armAtContact ? angleAt(pc[C.hitSho], pc[C.hitElb], pc[C.hitWri]) : NaN,
+    contactHeight: wristAtContact ? within(pc[C.hitWri][1], -2, 3.6) : NaN,
+    contactFront: wristAtContact ? within(pc[C.hitWri][0], -2, 3) : NaN,
+    finishHeight: seen(finish, ['hitWri'], SEEN_FAST) ? within(canon[finish][C.hitWri][1], -2, 3.6) : NaN,
+    takeback: backFrames.length >= 0.5 * (contact + 1) ? within(Math.max(0, -Math.min(...backFrames)), 0, 3) : NaN,
     shoulderTurn: maxW > 0 ? (100 * (maxW - minW)) / maxW : NaN,
     trunkTilt: trunk(pc),
-    stance: dist(pc[C.hitAnk], pc[C.offAnk]),
-    swingTime: (contact - prep) / fps / timeScale,
-    wristSpeed: vPeak * timeScale,
-    tossArm: canon[prep][C.offWri][1],
+    stance: seen(contact, ['hitAnk', 'offAnk']) ? within(dist(pc[C.hitAnk], pc[C.offAnk]), 0, 4) : NaN,
+    swingTime: armHidden ? NaN : (contact - prep) / fps / timeScale,
+    wristSpeed: armHidden ? NaN : vPeak * timeScale,
+    tossArm: seen(prep, ['offWri']) ? within(canon[prep][C.offWri][1], -2, 3.6) : NaN,
   };
   for (const k of Object.keys(metrics)) if (!Number.isFinite(metrics[k])) metrics[k] = null;
 
-  return { shot, hand: h, handSwapped: h !== hand, dir, torso, fps, timeScale, events, canon, metrics, n };
+  return { shot, hand: h, handSwapped: h !== hand, dir, torso, fps, timeScale, events, canon, conf, metrics, n, legsHidden, armHidden };
 }
 
 // ---------- alignment & comparison ----------
@@ -382,14 +427,20 @@ const JOINT_W = {
   hitSho: 1, hitElb: 1.5, hitWri: 2, offSho: 0.8, offElb: 0.7, offWri: 0.7,
   hitHip: 0.5, offHip: 0.5, hitKnee: 1, offKnee: 1, hitAnk: 0.7, offAnk: 0.7,
 };
-export function poseDistance(pa, pb) {
+// Average distance between matching joints, in torso lengths. Joints that
+// weren't clearly seen in either stroke (ca / cb confidences) are left out.
+export function poseDistance(pa, pb, ca = null, cb = null) {
   let s = 0, ws = 0;
   for (const [name, w] of Object.entries(JOINT_W)) {
-    s += w * dist(pa[C[name]], pb[C[name]]);
+    const j = C[name];
+    if ((ca && ca[j] < SEEN) || (cb && cb[j] < SEEN)) continue;
+    s += w * dist(pa[j], pb[j]);
     ws += w;
   }
-  return s / ws;
+  return ws ? s / ws : NaN;
 }
+
+const confAt = (analysis, idx) => (analysis.conf ? analysis.conf[clamp(Math.round(idx), 0, analysis.conf.length - 1)] : null);
 
 export const scoreFromDistance = (d) => Math.round(clamp(100 - d * 120, 0, 100));
 
@@ -404,15 +455,18 @@ export function compareStrokes(student, ref, samples = 60) {
   const dists = [];
   for (let k = 0; k < samples; k++) {
     const u = k / (samples - 1);
-    dists.push({ u, d: poseDistance(poseAt(student, indexFromU(aS, u)), poseAt(ref, indexFromU(aR, u))) });
+    const iS = indexFromU(aS, u), iR = indexFromU(aR, u);
+    const d = poseDistance(poseAt(student, iS), poseAt(ref, iR), confAt(student, iS), confAt(ref, iR));
+    if (Number.isFinite(d)) dists.push({ u, d });
   }
-  const meanD = dists.reduce((s, x) => s + x.d, 0) / dists.length;
+  const mean = (arr) => (arr.length ? arr.reduce((s, x) => s + x.d, 0) / arr.length : NaN);
+  const meanD = mean(dists);
   const phases = {};
   for (const ph of PHASES) {
-    const sel = dists.filter((x) => x.u >= ph.from && x.u <= ph.to);
-    phases[ph.key] = scoreFromDistance(sel.reduce((s, x) => s + x.d, 0) / sel.length);
+    const v = mean(dists.filter((x) => x.u >= ph.from && x.u <= ph.to));
+    phases[ph.key] = Number.isFinite(v) ? scoreFromDistance(v) : null;
   }
-  return { score: scoreFromDistance(meanD), meanDistance: meanD, phases, curve: dists };
+  return { score: Number.isFinite(meanD) ? scoreFromDistance(meanD) : null, meanDistance: meanD, phases, curve: dists };
 }
 
 // ---------- checkpoint evaluation & coaching tips ----------
@@ -456,4 +510,90 @@ export function evaluate(studentMetrics, refMetrics, shotId, refName = 'the pro'
       return { key: r.key, status: r.status, text };
     });
   return { rows, tips, onTarget: rows.filter((r) => r.status === 'good').length, rated: rows.filter((r) => r.status !== 'none').length };
+}
+
+// ---------- automatic shot recognition ----------
+// Rule-based: uses only body-relative cues, so it works from any camera angle
+// as long as the whole body is visible. Returns the most likely shot and a
+// 0..1 confidence.
+export function classifyStroke(stroke, { hand = 'R' } = {}) {
+  const { frames, fps } = stroke;
+  const n = frames.length;
+  const torso = torsoLength(frames);
+  const { wri } = handIdx(hand);
+  const v = speedSeries(frames, wri, fps, torso);
+  const contact = clamp(stroke.contact != null ? stroke.contact : v.indexOf(Math.max(...v)), 1, Math.max(1, n - 2));
+  const dir = swingDirection(frames, wri, contact);
+  const canon = canonicalize(frames, hand, dir, torso);
+  const conf = canonScores(frames, hand);
+  const ok = (i, nm, t = SEEN_FAST) => conf[i][C[nm]] >= t;
+  const at = (i, nm) => canon[clamp(i, 0, n - 1)][C[nm]];
+  const sec = (s) => Math.round(s * fps);
+  const wristGap = (i) => dist(at(i, 'hitWri'), at(i, 'offWri'));
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN);
+  const frameRange = (a, b) => { const out = []; for (let i = Math.max(0, a); i <= Math.min(n - 1, b); i++) out.push(i); return out; };
+
+  // 1. Overhead strokes: hand above the head around contact. (The hand's
+  // speed peaks a moment before the highest point, so look either side.)
+  const around = frameRange(contact - sec(0.12), contact + 1);
+  const hTop = Math.max(...around.map((i) => at(i, 'hitWri')[1] - Math.max(1.5, at(i, 'head')[1] - 0.15)));
+  if (hTop > 0) {
+    // A serve starts with both hands low together (ball on the strings), then
+    // the tossing hand goes up while the racquet drops behind.
+    const early = frameRange(0, contact - sec(0.5));
+    const startLowTogether = early.some((i) => wristGap(i) < 0.6 && at(i, 'hitWri')[1] < 1.1 && at(i, 'offWri')[1] < 1.1);
+    const tossUp = frameRange(contact - sec(1.0), contact - 2).some((i) => ok(i, 'offWri') && at(i, 'offWri')[1] > Math.max(1.8, at(i, 'head')[1]));
+    // Only a serve starts from the ready position with ball and racquet together.
+    const shot = startLowTogether ? 'serve' : 'overhead';
+    return { shot, confidence: startLowTogether && tossUp ? 0.9 : 0.7, features: { hTop, startLowTogether, tossUp } };
+  }
+
+  // 2. Swing size: take-back depth and follow-through length.
+  const prepRange = frameRange(contact - sec(0.9), contact - 1).filter((i) => ok(i, 'hitWri'));
+  let prep = prepRange[0] ?? Math.max(0, contact - 1);
+  for (const i of prepRange) if (at(i, 'hitWri')[0] < at(prep, 'hitWri')[0]) prep = i;
+  const takeback = Math.max(0, -at(prep, 'hitWri')[0]);
+  let follow = 0;
+  for (const i of frameRange(contact + 1, contact + sec(0.45))) follow += dist(at(i, 'hitWri'), at(i - 1, 'hitWri'));
+  const volley = takeback < 0.4 || (takeback < 0.65 && follow < 1.7);
+
+  // 3. Forehand or backhand side.
+  const nearContact = frameRange(contact - 2, contact + 2).filter((i) => ok(i, 'offWri') && ok(i, 'hitWri'));
+  const gapContact = avg(nearContact.map(wristGap));
+  const gapPrep = ok(prep, 'offWri') ? wristGap(prep) : NaN;
+  const twoHanded = gapContact < 0.45;
+  // Where the hand sits along the shoulder line at the end of the take-back:
+  // +1 = at the hitting shoulder, -1 = at the other shoulder.
+  const sh = at(prep, 'hitSho'), so = at(prep, 'offSho');
+  const axis = [sh[0] - so[0], sh[1] - so[1]];
+  const axisLen2 = axis[0] ** 2 + axis[1] ** 2;
+  const smid = mid(sh, so), w = at(prep, 'hitWri');
+  const side = axisLen2 > 0.3 ** 2 ? (2 * ((w[0] - smid[0]) * axis[0] + (w[1] - smid[1]) * axis[1])) / axisLen2 : NaN;
+
+  let back = 0;
+  if (twoHanded) back += 2.5;
+  if (gapPrep < 0.6) back += 1.2; else if (gapPrep > 0.9) back -= 1.2;
+  if (side < -0.3) back += 1; else if (side > 0.5) back -= 1;
+  const isBack = back > 0;
+  const sideConf = clamp(0.5 + Math.abs(back) * 0.15, 0.5, 0.95);
+
+  if (volley) {
+    return { shot: isBack ? 'bhVolley' : 'fhVolley', confidence: sideConf * 0.9, features: { takeback, follow, gapPrep, gapContact, side } };
+  }
+  if (!isBack) return { shot: 'forehand', confidence: sideConf, features: { takeback, follow, gapPrep, gapContact, side } };
+  if (twoHanded) return { shot: 'backhand2', confidence: sideConf, features: { takeback, follow, gapPrep, gapContact, side } };
+  // One hand on a backhand: slice swings high to low, topspin low to high.
+  const prepH = at(prep, 'hitWri')[1];
+  const lowH = at(contact + sec(0.1), 'hitWri')[1];
+  const finH = at(contact + sec(0.35), 'hitWri')[1];
+  const slice = prepH - lowH > 0.25 && finH - lowH < 0.6;
+  return { shot: slice ? 'slice' : 'backhand1', confidence: sideConf * 0.9, features: { takeback, follow, gapPrep, gapContact, side, prepH, finH } };
+}
+
+// Re-cut a captured window to the given shot's pre/post-contact window.
+export function recut(full, shot) {
+  const cfg = shotConfig(shot);
+  const a = Math.max(0, full.contact - Math.round(cfg.pre * full.fps));
+  const b = Math.min(full.frames.length - 1, full.contact + Math.round(cfg.post * full.fps));
+  return { range: [a, b], stroke: { ...full, frames: full.frames.slice(a, b + 1), contact: full.contact - a, offset: (full.offset || 0) + a, t0: (full.t0 || 0) + a / full.fps } };
 }
