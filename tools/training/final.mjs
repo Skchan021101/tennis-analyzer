@@ -36,8 +36,7 @@ for (const view of views) {
       if (!k.length) k = A.detectStrokes(seq, { hand: 'R', shot: 'auto', view: 'front', sensitivity: 2.5, relative: 0.3 });
       if (!k.length) continue;
       found++;
-      const v = A.speedSeries(seq.frames, 10, 30, A.torsoLength(seq.frames));
-      const contact = k.reduce((b, i) => (v[i] > v[b] ? i : b));
+      const contact = A.strongestStroke(seq, k, 'R');
       const p = predictMLP(final, A.strokeFeatures(A.cutStroke(seq, contact, 'auto'), 'R'));
       const ok = CLASSES[p.k] === c.label;
       if (ok) right++;

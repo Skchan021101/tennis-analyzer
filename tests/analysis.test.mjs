@@ -137,3 +137,16 @@ test('a preparation movement just before the hit is not counted as its own strok
   // A follow-through peak right after contact keeps the faster one.
   assert.deepEqual(A.pickStrokes([60, 70], v.map((x, i) => (i === 70 ? 6 : x)), 48, 30), [60]);
 });
+
+test('checkpoints that a front or behind camera cannot measure are left out', () => {
+  const { stroke } = analyzeDemo('pro');
+  for (const view of ['front', 'behind']) {
+    const an = A.analyzeStroke(stroke, { shot: 'forehand', hand: 'R', view });
+    for (const k of A.VIEW_UNRELIABLE[view]) assert.equal(an.metrics[k], null, `${view} ${k}`);
+    const ev = A.evaluate(an.metrics, null, 'forehand', 'the reference', view);
+    assert.ok(ev.rows.every((r) => !A.VIEW_UNRELIABLE[view].includes(r.key)));
+    assert.ok(ev.rows.some((r) => r.key === 'contactHeight'), 'heights are still checked');
+  }
+  const side = A.analyzeStroke(stroke, { shot: 'forehand', hand: 'R', view: 'side' });
+  assert.ok(side.metrics.contactElbow != null && side.metrics.loadKnee != null);
+});

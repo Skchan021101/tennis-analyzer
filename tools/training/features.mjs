@@ -34,8 +34,7 @@ export function strokeOf(clip, hand = 'R', view = clip.view || 'side') {
   let relaxed = false;
   if (!contacts.length) { contacts = A.detectStrokes(seq, { hand, shot: 'auto', view, sensitivity: 2.5, relative: 0.3 }); relaxed = true; }
   if (!contacts.length) return null;
-  const v = A.speedSeries(seq.frames, hand === 'L' ? 9 : 10, 30, A.torsoLength(seq.frames));
-  const contact = contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
+  const contact = A.strongestStroke(seq, contacts, hand);
   return { seq, full: A.cutStroke(seq, contact, 'auto'), relaxed, nDetected: contacts.length };
 }
 

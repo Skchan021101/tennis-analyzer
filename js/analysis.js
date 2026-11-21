@@ -255,6 +255,13 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
   return pickStrokes(candidates, v, gap, fps);
 }
 
+// The detected stroke with the fastest hand, or null.
+export function strongestStroke(seq, contacts, hand = 'R') {
+  if (!contacts.length) return null;
+  const v = speedSeries(seq.frames, hand === 'L' ? 9 : 10, seq.fps, torsoLength(seq.frames));
+  return contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
+}
+
 // Of hand-speed peaks closer together than the minimum gap, keep one. The
 // preparation (take-back, or toss and racquet drop on a serve) comes 0.6 s or
 // more before the hit and can be nearly as fast, so such a later peak wins if
@@ -332,7 +339,17 @@ function swingDirection(frames, wri, contact) {
   return dx < 0 ? -1 : 1;
 }
 
-export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
+// Checkpoints that a single camera can't measure from this angle. From the
+// front or behind, the swing toward the net runs along the camera's line of
+// sight, so 2D elbow and knee angles, "in front of the hips", trunk lean and
+// take-back depth are foreshortened and would be misleading.
+export const VIEW_UNRELIABLE = {
+  side: [],
+  behind: ['contactElbow', 'loadKnee', 'contactFront', 'trunkTilt', 'takeback'],
+  front: ['contactElbow', 'loadKnee', 'contactFront', 'trunkTilt', 'takeback'],
+};
+
+export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1, view = 'side' }) {
   const cfg = SHOT_BY_ID[shot];
   const { frames, fps } = stroke;
   const n = frames.length;
@@ -343,7 +360,8 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
 
   // Guard against the whole clip having left/right arms labelled the wrong
   // way round: the hitting hand should be the fast one (two-handers excepted).
-  if (shot !== 'backhand2') {
+  // (Side-on only: from the front or behind the other hand can look faster.)
+  if (shot !== 'backhand2' && view === 'side') {
     const other = speedSeries(frames, handIdx(h).owri, fps, torso);
     if (Math.max(...other) > 1.35 * Math.max(...v)) {
       h = h === 'L' ? 'R' : 'L';
@@ -376,8 +394,17 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
   // End of preparation.
   let prep = 0;
   if (cfg.prep === 'trophy') {
-    let best = Infinity;
-    for (let i = 0; i <= contact - 2; i++) if (kneeAngles[i] < best) { best = kneeAngles[i]; prep = i; }
+    // Trophy position: the tossing (or pointing) hand at its highest before
+    // the swing; visible from any angle. Deepest knee bend as a fallback.
+    let best = -Infinity;
+    for (let i = Math.max(0, contact - Math.round(1.6 * fps)); i <= contact - 2; i++) {
+      if (conf[i][C.offWri] < SEEN) continue;
+      if (canon[i][C.offWri][1] > best) { best = canon[i][C.offWri][1]; prep = i; }
+    }
+    if (best < 1.2) { // tossing arm not clearly up: fall back to the knees
+      best = Infinity;
+      for (let i = 0; i <= contact - 2; i++) if (kneeAngles[i] < best) { best = kneeAngles[i]; prep = i; }
+    }
     if (best === Infinity) {
       // Legs not visible: use the pause of the hand before the drive instead.
       let slow = Infinity;
@@ -434,8 +461,9 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
     tossArm: seen(prep, ['offWri']) ? within(canon[prep][C.offWri][1], -2, 3.6) : NaN,
   };
   for (const k of Object.keys(metrics)) if (!Number.isFinite(metrics[k])) metrics[k] = null;
+  for (const k of VIEW_UNRELIABLE[view] || []) metrics[k] = null;
 
-  return { shot, hand: h, handSwapped: h !== hand, dir, torso, fps, timeScale, events, canon, conf, metrics, n, legsHidden, armHidden };
+  return { shot, view, hand: h, handSwapped: h !== hand, dir, torso, fps, timeScale, events, canon, conf, metrics, n, legsHidden, armHidden };
 }
 
 // ---------- alignment & comparison ----------
@@ -526,10 +554,12 @@ export function compareStrokes(student, ref, samples = 60) {
 }
 
 // ---------- checkpoint evaluation & coaching tips ----------
-export function evaluate(studentMetrics, refMetrics, shotId, refName = 'the pro') {
+export function evaluate(studentMetrics, refMetrics, shotId, refName = 'the pro', view = 'side') {
   const cfg = SHOT_BY_ID[shotId];
   const rows = [];
+  const skip = new Set(VIEW_UNRELIABLE[view] || []);
   for (const [key, guide] of Object.entries(cfg.metrics)) {
+    if (skip.has(key)) continue; // can't be measured from this camera angle
     const m = METRICS[key];
     const s = studentMetrics[key];
     let target = null, targetText = '–', source = null;

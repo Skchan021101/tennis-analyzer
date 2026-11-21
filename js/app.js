@@ -162,6 +162,11 @@ function refreshSetup() {
   $('film-tip').innerHTML = state.shot === 'auto' && !shot
     ? `<strong>Filming any shot:</strong> ${esc(AUTO.film)} The shot type is detected for each swing.`
     : `<strong>Filming ${esc(cfg.name.toLowerCase())}:</strong> ${esc(cfg.film)}`;
+  if (state.view !== 'side') {
+    $('film-tip').innerHTML += state.view === 'front'
+      ? ' <strong>Front camera:</strong> shot recognition is less reliable from the front (about 66% right, against 83% side-on) and elbow, knee and contact-in-front checks are hidden. Side-on gives the most complete analysis.'
+      : ' <strong>Behind camera:</strong> shot recognition works about as well as side-on, but elbow, knee and contact-in-front checks need a side-on camera.';
+  }
   const sel = $('ref-select');
   if (!shot) {
     sel.innerHTML = '<option value="">Matched to each detected shot</option>';
@@ -187,7 +192,7 @@ function refreshSetup() {
 const refAnalyses = new Map();
 function refAnalysis(ref) {
   if (!refAnalyses.has(ref.id)) {
-    refAnalyses.set(ref.id, A.analyzeStroke({ frames: ref.frames, fps: ref.fps, contact: ref.contact }, { shot: ref.shot, hand: ref.hand }));
+    refAnalyses.set(ref.id, A.analyzeStroke({ frames: ref.frames, fps: ref.fps, contact: ref.contact }, { shot: ref.shot, hand: ref.hand, view: ref.view }));
   }
   return refAnalyses.get(ref.id);
 }
@@ -229,7 +234,7 @@ function setCurrent(cur) {
 function analyzeCurrent() {
   const c = state.current;
   if (!c || c.source === 'demo') return;
-  c.analysis = A.analyzeStroke(c.stroke, { shot: c.shot, hand: state.hand });
+  c.analysis = A.analyzeStroke(c.stroke, { shot: c.shot, hand: state.hand, view: state.view });
 }
 
 // A captured stroke keeps its full capture window, so it can be re-cut when
@@ -246,7 +251,7 @@ function applyShot(c, shot) {
   const { range, stroke } = A.recut(c.full.stroke, shot);
   c.stroke = stroke;
   c.images = c.full.images ? c.full.images.slice(range[0], range[1] + 1) : null;
-  c.analysis = A.analyzeStroke(c.stroke, { shot, hand: state.hand });
+  c.analysis = A.analyzeStroke(c.stroke, { shot, hand: state.hand, view: state.view });
 }
 
 function setCurrentShot(shot) {
@@ -303,7 +308,7 @@ async function renderCurrent() {
   document.querySelector('.result .contact-adjust').hidden = isDemo;
 
   // Tips say "the reference"; the full reference name is shown in the heading.
-  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, isDemo ? 'the demo pro' : 'the reference');
+  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, isDemo ? 'the demo pro' : 'the reference', isDemo ? 'side' : state.view);
   let cmp = refData ? A.compareStrokes(c.analysis, refData.analysis) : null;
   if (cmp && cmp.score == null) cmp = null; // nothing comparable was tracked
   c.evaluation = evalRes;
@@ -358,6 +363,8 @@ async function renderCurrent() {
 
   // Checkpoints
   $('target-col').textContent = refData ? 'Reference' : 'Guide';
+  $('cp-view-note').textContent = !isDemo && state.view !== 'side'
+    ? `Elbow and knee angles, contact in front, trunk lean and take-back are hidden: they need a side-on camera.` : '';
   const statusText = { good: 'On target', close: 'Close', work: 'Work on', none: '–' };
   document.querySelector('#checkpoints tbody').innerHTML = evalRes.rows.map((r) => `
     <tr>
@@ -858,7 +865,7 @@ async function pickRefStroke(i) {
 
 function renderRefDraft() {
   const d = refDraft.current, clip = refDraft.clip;
-  d.analysis = A.analyzeStroke(d.stroke, { shot: d.shot, hand: clip.hand });
+  d.analysis = A.analyzeStroke(d.stroke, { shot: d.shot, hand: clip.hand, view: $('ref-view').value });
   refViewer.setData({
     student: { analysis: d.analysis, frames: d.stroke.frames, width: d.width, height: d.height, images: d.images, label: `${$('ref-player').value || 'Reference'} · ${SHOT_BY_ID[d.shot].name}` },
     ref: null, phases: SHOT_BY_ID[d.shot].phases,
@@ -994,12 +1001,11 @@ async function importClip(file, filePath, opts, est, signal, onProgress) {
     if (!contacts.length) contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, view: opts.view, sensitivity: 2.5, relative: 0.3 });
     if (!contacts.length) return { status: 'fail', text: 'No swing found' };
     // One reference per clip: the strongest stroke.
-    const v = A.speedSeries(res.seq.frames, opts.hand === 'L' ? 9 : 10, res.seq.fps, A.torsoLength(res.seq.frames));
-    const contact = contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
+    const contact = A.strongestStroke(res.seq, contacts, opts.hand);
     const full = A.cutStroke(res.seq, contact, 'auto');
     const shot = named || A.detectShot(full, { hand: opts.hand, view: opts.view }).shot;
     const { range, stroke } = A.recut(full, shot);
-    const analysis = A.analyzeStroke(stroke, { shot, hand: opts.hand });
+    const analysis = A.analyzeStroke(stroke, { shot, hand: opts.hand, view: opts.view });
     let images = null;
     if (opts.keepFrames) images = await extractFrames(video, stroke.frames.map((_, k) => res.videoTime(full.offset + range[0] + k)));
     const base = filePath.replace(/\.[^./]+$/, '').split('/').slice(-2).join(' / ');
