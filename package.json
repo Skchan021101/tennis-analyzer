@@ -1,0 +1,10 @@
+{
+  "name": "tennis-analyzer",
+  "private": true,
+  "type": "module",
+  "description": "Browser app that compares a student's tennis strokes with a pro reference using pose estimation.",
+  "scripts": {
+    "start": "python3 -m http.server 8080",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
