@@ -16,7 +16,10 @@ test('a model ships for every camera angle, with its held-out accuracy', () => {
     assert.equal(m.type, 'mlp');
     assert.deepEqual(m.classes, SHOTS.map((s) => s.id));
     assert.equal(m.mu.length, A.strokeFeatures(demoStroke(makeDemoSamples('pro'))).length, 'feature count matches');
-    assert.ok(SHOT_MODEL_REPORT[view].heldOutAccuracy > 0.7);
+    // Regression floors, a little under the measured accuracy on players left
+    // out of training (front includes beginner strokes, which are harder).
+    const floor = { side: 0.8, behind: 0.8, front: 0.6 }[view];
+    assert.ok(SHOT_MODEL_REPORT[view].heldOutAccuracy >= floor, `${view} ${SHOT_MODEL_REPORT[view].heldOutAccuracy}`);
   }
 });
 

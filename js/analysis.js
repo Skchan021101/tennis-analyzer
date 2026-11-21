@@ -696,6 +696,17 @@ export function strokeFeatures(stroke, hand = 'R') {
   const minGap = before.length ? Math.min(...before.map((p) => dist(p[wri], p[owri]) / torso)) : 0;
   const maxOff = before.length ? Math.max(...before.map((p) => (hip0(p)[1] - p[owri][1]) / torso)) : 0;
   f.push(moved, minGap, maxOff);
+  // Motion: hitting-hand velocity (forward, up) and hitting-elbow and knee
+  // angles through the swing.
+  for (const dt of [-0.5, -0.3, -0.15, 0, 0.15, 0.3]) {
+    const i = clamp(contact + Math.round(dt * fps), 1, n - 2);
+    const a = frames[i - 1], c2 = frames[i + 1];
+    const rel = (p) => [p[wri][0] - hip0(p)[0], p[wri][1] - hip0(p)[1]];
+    const ra = rel(a), rc = rel(c2);
+    f.push(((rc[0] - ra[0]) * dir * fps) / (2 * torso) / 10, ((ra[1] - rc[1]) * fps) / (2 * torso) / 10);
+    const p = frames[i];
+    f.push((angleAt(p[ix.hitSho], p[ix.hitElb], p[ix.hitWri]) || 0) / 180, (Math.min(angleAt(p[ix.hitHip], p[ix.hitKnee], p[ix.hitAnk]), angleAt(p[ix.offHip], p[ix.offKnee], p[ix.offAnk])) || 0) / 180);
+  }
   f.push(
     Math.min(...shoW) / (Math.max(...shoW) || 1),
     angleAt(pc[ix.hitSho], pc[ix.hitElb], pc[ix.hitWri]) / 180 || 0,
