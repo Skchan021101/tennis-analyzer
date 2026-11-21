@@ -1,4 +1,4 @@
-import { SHOTS, SHOT_BY_ID, VIEWS, AUTO, shotFromName } from './shots.js';
+import { SHOTS, SHOT_BY_ID, VIEWS, AUTO, METRICS, shotFromName } from './shots.js';
 import * as A from './analysis.js';
 import { createEstimator } from './pose.js';
 import { openVideo, processClip, extractFrames, bitmapsToBlobs, blobsToBitmaps, LiveSession } from './capture.js';
@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { StrokeViewer } from './viewer.js';
 import { makeDemoSamples, DEMO_SIZE } from './demo.js';
 
-const APP_VERSION = 'Version 3 · auto-detect, bulk import';
+const APP_VERSION = 'Version 6 · trained shot recognition, starter references';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
@@ -28,6 +28,7 @@ const state = {
   current: null,
   clip: null,
   liveStrokes: [],
+  liveTally: {},
   live: null,
   refBitmaps: new Map(),
   busy: null,
@@ -96,11 +97,20 @@ function buildSetup() {
     if (state.live) state.live.config.hand = state.hand;
     const c = state.current;
     if (c && c.source !== 'demo') {
-      c.detected = A.classifyStroke(c.full.stroke, { hand: state.hand });
-      setCurrentShot(state.shot === 'auto' ? c.detected.shot : c.shot);
+      c.detected = A.detectShot(c.full.stroke, { hand: state.hand, view: state.view });
+      setCurrentShot(state.shot === 'auto' && !c.manualShot ? c.detected.shot : c.shot);
     }
   }));
-  $('view-select').addEventListener('change', (e) => { state.view = e.target.value; prefs.view = state.view; savePrefs(); refreshSetup(); });
+  $('view-select').addEventListener('change', (e) => {
+    state.view = e.target.value; prefs.view = state.view; savePrefs();
+    if (state.live) state.live.config.view = state.view;
+    // The shot recogniser depends on the camera angle, so re-check the stroke on screen.
+    const c = state.current;
+    if (c && c.source !== 'demo') {
+      c.detected = A.detectShot(c.full.stroke, { hand: state.hand, view: state.view });
+      setCurrentShot(state.shot === 'auto' && !c.manualShot ? c.detected.shot : c.shot);
+    } else refreshSetup();
+  });
   $('ref-select').addEventListener('change', (e) => {
     const shot = effectiveShot();
     if (shot) prefs.refByShot = { ...(prefs.refByShot || {}), [shot]: e.target.value || 'none' };
@@ -152,6 +162,11 @@ function refreshSetup() {
   $('film-tip').innerHTML = state.shot === 'auto' && !shot
     ? `<strong>Filming any shot:</strong> ${esc(AUTO.film)} The shot type is detected for each swing.`
     : `<strong>Filming ${esc(cfg.name.toLowerCase())}:</strong> ${esc(cfg.film)}`;
+  if (state.view !== 'side') {
+    $('film-tip').innerHTML += state.view === 'front'
+      ? ' <strong>Front camera:</strong> shot recognition is less reliable from the front (about 66% right, against 83% side-on) and elbow, knee and contact-in-front checks are hidden. Side-on gives the most complete analysis.'
+      : ' <strong>Behind camera:</strong> shot recognition works about as well as side-on, but elbow, knee and contact-in-front checks need a side-on camera.';
+  }
   const sel = $('ref-select');
   if (!shot) {
     sel.innerHTML = '<option value="">Matched to each detected shot</option>';
@@ -177,7 +192,7 @@ function refreshSetup() {
 const refAnalyses = new Map();
 function refAnalysis(ref) {
   if (!refAnalyses.has(ref.id)) {
-    refAnalyses.set(ref.id, A.analyzeStroke({ frames: ref.frames, fps: ref.fps, contact: ref.contact }, { shot: ref.shot, hand: ref.hand }));
+    refAnalyses.set(ref.id, A.analyzeStroke({ frames: ref.frames, fps: ref.fps, contact: ref.contact }, { shot: ref.shot, hand: ref.hand, view: ref.view }));
   }
   return refAnalyses.get(ref.id);
 }
@@ -219,14 +234,14 @@ function setCurrent(cur) {
 function analyzeCurrent() {
   const c = state.current;
   if (!c || c.source === 'demo') return;
-  c.analysis = A.analyzeStroke(c.stroke, { shot: c.shot, hand: state.hand });
+  c.analysis = A.analyzeStroke(c.stroke, { shot: c.shot, hand: state.hand, view: state.view });
 }
 
 // A captured stroke keeps its full capture window, so it can be re-cut when
 // the shot type changes (a serve needs more lead-in than a volley).
 function buildCurrent(source, full, images, width, height, extra = {}) {
   const c = { source, createdAt: Date.now(), full: { stroke: full, images }, width, height, ...extra };
-  c.detected = A.classifyStroke(full, { hand: state.hand });
+  c.detected = A.detectShot(full, { hand: state.hand, view: state.view });
   applyShot(c, state.shot === 'auto' ? c.detected.shot : state.shot);
   return c;
 }
@@ -236,7 +251,7 @@ function applyShot(c, shot) {
   const { range, stroke } = A.recut(c.full.stroke, shot);
   c.stroke = stroke;
   c.images = c.full.images ? c.full.images.slice(range[0], range[1] + 1) : null;
-  c.analysis = A.analyzeStroke(c.stroke, { shot, hand: state.hand });
+  c.analysis = A.analyzeStroke(c.stroke, { shot, hand: state.hand, view: state.view });
 }
 
 function setCurrentShot(shot) {
@@ -245,6 +260,22 @@ function setCurrentShot(shot) {
   applyShot(c, shot);
   renderCurrent();
 }
+
+$('shot-pick').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-pick]');
+  const c = state.current;
+  if (!b || !c) return;
+  c.manualShot = true; // corrected by hand: stop asking for this stroke
+  setCurrentShot(b.dataset.pick);
+  const entry = state.liveStrokes.find((x) => x.current === c);
+  if (entry) {
+    if (entry.tallied && state.liveTally[entry.tallied]) state.liveTally[entry.tallied]--;
+    state.liveTally[c.shot] = (state.liveTally[c.shot] || 0) + 1;
+    entry.tallied = c.shot;
+    renderTally();
+    renderLiveChips(state.liveStrokes.indexOf(entry));
+  }
+});
 
 async function renderCurrent() {
   const c = state.current;
@@ -272,10 +303,12 @@ async function renderCurrent() {
   $('example-note').hidden = !isDemo;
   $('save-session').hidden = isDemo;
   $('save-as-ref').hidden = isDemo;
+  $('discard-stroke').hidden = c.source !== 'live';
   $('save-ref-form').hidden = true;
   document.querySelector('.result .contact-adjust').hidden = isDemo;
 
-  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, refData?.label || 'the pro');
+  // Tips say "the reference"; the full reference name is shown in the heading.
+  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, isDemo ? 'the demo pro' : 'the reference', isDemo ? 'side' : state.view);
   let cmp = refData ? A.compareStrokes(c.analysis, refData.analysis) : null;
   if (cmp && cmp.score == null) cmp = null; // nothing comparable was tracked
   c.evaluation = evalRes;
@@ -301,7 +334,13 @@ async function renderCurrent() {
   $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : 'Clip'} · ${new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}${auto ? ' · Shot detected automatically' : ''}`;
   $('result-title').textContent = cfg.name;
   let sub = cmp ? `Match with ${refData.label}` : `Checked against guide ranges. Add a ${cfg.name.toLowerCase()} reference in the Pro library for a match score.`;
-  if (auto && c.detected.confidence < 0.65) sub += ' · Not certain about the shot type. If it\'s wrong, pick the right shot above.';
+  // When the recogniser isn't sure, offer its two best guesses as one-tap fixes.
+  const pick = $('shot-pick');
+  const unsure = auto && !c.manualShot && !c.detected.sure;
+  pick.hidden = !unsure;
+  if (unsure) {
+    pick.innerHTML = `<span>Not sure which shot this is:</span>${c.detected.alternatives.map((a) => `<button type="button" class="chip" data-pick="${a.shot}" aria-pressed="${a.shot === c.shot}">${esc(SHOT_BY_ID[a.shot].name)}</button>`).join('')}<span class="pick-hint">or choose any shot above</span>`;
+  }
   if (c.analysis.handSwapped) sub += ` · The hitting arm looked like the ${c.analysis.hand === 'L' ? 'left' : 'right'} one; check the "Plays" setting.`;
   if (!isDemo && c.analysis.legsHidden) sub += ' · The legs weren\'t clearly in view, so the knee and stance checks were skipped. Move the camera back so the whole body is in frame.';
   if (!isDemo && c.analysis.armHidden) sub += ' · The hitting arm was hard to track, so arm checks may be missing. Try better light or a faster frame rate.';
@@ -324,6 +363,8 @@ async function renderCurrent() {
 
   // Checkpoints
   $('target-col').textContent = refData ? 'Reference' : 'Guide';
+  $('cp-view-note').textContent = !isDemo && state.view !== 'side'
+    ? `Elbow and knee angles, contact in front, trunk lean and take-back are hidden: they need a side-on camera.` : '';
   const statusText = { good: 'On target', close: 'Close', work: 'Work on', none: '–' };
   document.querySelector('#checkpoints tbody').innerHTML = evalRes.rows.map((r) => `
     <tr>
@@ -390,13 +431,13 @@ async function analyzeClipFile(file) {
       fps: 30, timeScale, signal: clipAbort.signal,
       onProgress: (i, n) => setProgress('', `Tracking the player: frame ${i} of ${n}`, i / n),
     });
-    let strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot });
-    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, sensitivity: 2.5, relative: 0.3 });
+    let strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, view: state.view });
+    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, view: state.view, sensitivity: 2.5, relative: 0.3 });
     hideProgress('');
     if (state.clip?.video) URL.revokeObjectURL(state.clip.video.src);
     const items = strokes.map((contact) => {
       const full = A.cutStroke(res.seq, contact, 'auto');
-      return { contact, full, detected: A.classifyStroke(full, { hand: state.hand }) };
+      return { contact, full, detected: A.detectShot(full, { hand: state.hand, view: state.view }) };
     });
     state.clip = { video, ...res, strokes, items, timeScale };
     if (!strokes.length) {
@@ -458,6 +499,8 @@ async function startLive() {
   }
   if (state.live) return;
   state.clip = null;
+  if (!state.liveStrokes.length) state.liveTally = {};
+  renderTally();
   if (state.liveStrokes.length) renderLiveChips(state.current?.liveIndex ?? -1);
   else $('stroke-strip').hidden = true;
   $('live').hidden = false;
@@ -466,7 +509,7 @@ async function startLive() {
   try {
     const est = await getEstimator('lightning');
     const session = new LiveSession($('live-video'), $('live-overlay'));
-    session.config = { hand: state.hand, shot: state.shot, sensitivity: 1 };
+    session.config = { hand: state.hand, shot: state.shot, sensitivity: +$('live-sensitivity').value || 1, view: state.view };
     session.addEventListener('frame', (e) => drawLiveOverlay(e.detail));
     session.addEventListener('stroke', (e) => onLiveStroke(e.detail));
     session.addEventListener('error', (e) => showMessage($('analyze-message'), `Pose tracking error: ${e.detail.message}`, 'error'));
@@ -486,20 +529,31 @@ async function startLive() {
 
 // Captured strokes keep their frames after the camera stops, so they can
 // still be reviewed; they're freed when a clip replaces them.
+// Free one captured stroke's frames, keeping any shared with other strokes.
+function releaseLiveEntry(entry) {
+  if (state.live) { state.live.release(entry.bitmaps); return; }
+  const inUse = new Set(state.liveStrokes.filter((s) => s !== entry).flatMap((s) => s.bitmaps));
+  new Set(entry.bitmaps).forEach((b) => { if (!inUse.has(b)) b.close?.(); });
+}
+
 function releaseLiveStrokes() {
   const bitmaps = new Set(state.liveStrokes.flatMap((s) => s.bitmaps));
   if (state.live) state.liveStrokes.forEach((s) => state.live.release(s.bitmaps));
   else bitmaps.forEach((b) => b.close?.());
   state.liveStrokes = [];
+  state.liveTally = {};
+  stopReplay();
 }
 
 function renderLiveChips(active) {
   $('stroke-strip-label').textContent = 'This session';
-  $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === active}">#${k + 1}${x.current ? ` ${esc(SHOT_BY_ID[x.current.shot].short)}` : ''}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
+  $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === active}">#${k + 1}${x.current ? ` ${esc(SHOT_BY_ID[x.current.shot].short)}${state.shot === 'auto' && !x.current.manualShot && !x.current.detected.sure ? '?' : ''}` : ''}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
   $('stroke-strip').hidden = !state.liveStrokes.length;
 }
 
 function stopLive() {
+  stopReplay();
+  $('live-banner').hidden = true;
   if (!state.live) { $('live').hidden = true; return; }
   state.live.stop();
   state.live = null;
@@ -523,6 +577,20 @@ function drawLiveOverlay({ kps, w, h, visible }) {
     ctx.strokeStyle = hit.includes(a) && hit.includes(b) ? '#e3f25a' : '#ffffff'; ctx.lineWidth = lw;
     ctx.beginPath(); ctx.moveTo(kps[a][0], kps[a][1]); ctx.lineTo(kps[b][0], kps[b][1]); ctx.stroke();
   }
+  // Hand path over the last 0.8 s, fading out, so the swing shape shows live.
+  const buf = state.live?.buffer || [];
+  const wi = state.hand === 'L' ? 9 : 10;
+  const tNow = buf.length ? buf[buf.length - 1].t : 0;
+  const trail = buf.filter((s) => s.t >= tNow - 0.8 && s.kps[wi][2] >= 0.2);
+  for (let k = 1; k < trail.length; k++) {
+    const age = (tNow - trail[k].t) / 0.8;
+    ctx.strokeStyle = `rgba(227, 242, 90, ${(0.9 * (1 - age)).toFixed(2)})`;
+    ctx.lineWidth = lw * (1.8 - age);
+    ctx.beginPath();
+    ctx.moveTo(trail[k - 1].kps[wi][0], trail[k - 1].kps[wi][1]);
+    ctx.lineTo(trail[k].kps[wi][0], trail[k].kps[wi][1]);
+    ctx.stroke();
+  }
   const st = $('live-status');
   const paused = !state.live?.detecting;
   if (paused) { st.textContent = 'Detection paused'; st.className = 'pill'; }
@@ -540,16 +608,89 @@ function onLiveStroke({ stroke, bitmaps, width, height }) {
     const old = state.liveStrokes.shift();
     state.live?.release(old.bitmaps);
   }
-  selectLiveStroke(state.liveStrokes.length - 1);
+  selectLiveStroke(state.liveStrokes.length - 1).then(() => {
+    const c = entry.current;
+    state.liveTally[c.shot] = (state.liveTally[c.shot] || 0) + 1;
+    entry.tallied = c.shot;
+    renderTally();
+    showSwingBanner(c);
+    startReplay(c);
+  });
+}
+
+// ---------- live overlay: swing label, shot count, instant replay ----------
+let bannerTimer = null;
+function showSwingBanner(c) {
+  const b = $('live-banner');
+  const unsure = state.shot === 'auto' && !c.manualShot && !c.detected.sure;
+  $('lb-shot').textContent = `${SHOT_BY_ID[c.shot].name}${unsure ? '?' : ''}`;
+  $('lb-score').textContent = c.comparison ? `Match ${c.comparison.score}` : `${c.evaluation.onTarget}/${c.evaluation.rated} on target`;
+  const top = c.evaluation.tips[0];
+  $('lb-tip').textContent = top ? `Work on: ${METRICS[top.key].short.toLowerCase()}` : (c.evaluation.rated ? 'Nice one' : '');
+  b.hidden = false;
+  b.classList.remove('fade');
+  b.style.animation = 'none'; void b.offsetWidth; b.style.animation = ''; // replay the entrance
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => { b.classList.add('fade'); bannerTimer = setTimeout(() => { b.hidden = true; }, 600); }, 2600);
+}
+
+function renderTally() {
+  const entries = SHOTS.filter((s) => state.liveTally[s.id]).map((s) => `<span>${esc(s.short)}<b>${state.liveTally[s.id]}</b></span>`);
+  $('live-tally').innerHTML = entries.join('');
+  $('live-tally').hidden = !entries.length;
+}
+
+// Loop the last stroke in slow motion in the corner of the live view.
+const replay = { raf: 0, c: null };
+function startReplay(c) {
+  stopReplay();
+  if (!c.images?.length) return;
+  replay.c = c;
+  const box = $('live-replay-box'), cv = $('live-replay');
+  const img0 = c.images[0];
+  cv.width = Math.min(480, img0.width);
+  cv.height = Math.round((cv.width * img0.height) / img0.width);
+  $('live-replay-cap').textContent = `Replay · ${SHOT_BY_ID[c.shot].short}`;
+  box.hidden = false;
+  const n = c.images.length, fps = c.stroke.fps * 0.4; // 0.4x speed
+  const hit = c.analysis.hand === 'L' ? [[5, 7], [7, 9]] : [[6, 8], [8, 10]];
+  const t0 = performance.now();
+  const frame = (now) => {
+    if (replay.c !== c) return;
+    // rAF timestamps can be slightly earlier than t0, so clamp at 0.
+    const i = Math.floor(((Math.max(0, now - t0) / 1000) * fps) % (n + 8)); // short pause at the end
+    const k = Math.min(i, n - 1, c.stroke.frames.length - 1);
+    const ctx = cv.getContext('2d');
+    try { ctx.drawImage(c.images[k], 0, 0, cv.width, cv.height); } catch { ctx.fillStyle = '#0a1a28'; ctx.fillRect(0, 0, cv.width, cv.height); }
+    const sx = cv.width / c.width;
+    const kps = c.stroke.frames[k];
+    ctx.lineCap = 'round';
+    for (const [a, b] of A.EDGES) {
+      ctx.strokeStyle = hit.some(([x, y]) => (x === a && y === b) || (x === b && y === a)) ? '#e3f25a' : 'rgba(124, 208, 255, 0.95)';
+      ctx.lineWidth = Math.max(2, cv.width / 140);
+      ctx.beginPath(); ctx.moveTo(kps[a][0] * sx, kps[a][1] * sx); ctx.lineTo(kps[b][0] * sx, kps[b][1] * sx); ctx.stroke();
+    }
+    if (Math.abs(k - c.analysis.events.contact) <= 1) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(cv.width - 78, 6, 72, 20);
+      ctx.fillStyle = '#fff'; ctx.font = '600 12px Barlow, sans-serif'; ctx.fillText('CONTACT', cv.width - 70, 20);
+    }
+    replay.raf = requestAnimationFrame(frame);
+  };
+  replay.raf = requestAnimationFrame(frame);
+}
+function stopReplay() {
+  cancelAnimationFrame(replay.raf);
+  replay.c = null;
+  $('live-replay-box').hidden = true;
 }
 
 function selectLiveStroke(i) {
   const s = state.liveStrokes[i];
-  if (!s) return;
+  if (!s) return Promise.resolve();
   if (!s.current) s.current = buildCurrent('live', s.full, s.bitmaps, s.width, s.height, { createdAt: s.createdAt });
   s.current.liveIndex = i;
   state.current = s.current;
-  renderCurrent().then(() => {
+  return renderCurrent().then(() => {
     s.score = s.current.comparison?.score;
     renderLiveChips(i);
     const st = $('live-status');
@@ -559,6 +700,27 @@ function selectLiveStroke(i) {
 
 $('live-start').addEventListener('click', startLive);
 $('live-stop').addEventListener('click', stopLive);
+if (['0.75', '1', '1.4'].includes(String(prefs.sensitivity))) $('live-sensitivity').value = String(prefs.sensitivity);
+$('live-sensitivity').addEventListener('change', (e) => {
+  prefs.sensitivity = +e.target.value; savePrefs();
+  if (state.live) state.live.config.sensitivity = +e.target.value;
+});
+$('discard-stroke').addEventListener('click', () => {
+  const c = state.current;
+  if (!c || c.source !== 'live') return;
+  const i = state.liveStrokes.findIndex((s) => s.current === c);
+  if (i < 0) return;
+  const gone = state.liveStrokes[i];
+  if (gone.tallied && state.liveTally[gone.tallied]) { state.liveTally[gone.tallied]--; renderTally(); }
+  if (replay.c === gone.current) stopReplay();
+  releaseLiveEntry(gone);
+  state.liveStrokes.splice(i, 1);
+  if (state.liveStrokes.length) { selectLiveStroke(Math.min(i, state.liveStrokes.length - 1)); return; }
+  state.current = null;
+  $('result').hidden = true;
+  $('stroke-strip').hidden = true;
+  refreshSetup();
+});
 $('live-flip').addEventListener('click', async () => {
   if (!state.live) return;
   try {
@@ -669,13 +831,14 @@ $('ref-input').addEventListener('change', async (e) => {
       fps: 30, timeScale, signal: refAbort.signal,
       onProgress: (i, n) => setProgress('ref-', `Tracking the player: frame ${i} of ${n}`, i / n),
     });
-    let strokes = A.detectStrokes(res.seq, { hand, shot });
-    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand, shot, sensitivity: 2.5, relative: 0.3 });
+    const refView = $('ref-view').value;
+    let strokes = A.detectStrokes(res.seq, { hand, shot, view: refView });
+    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand, shot, view: refView, sensitivity: 2.5, relative: 0.3 });
     hideProgress('ref-');
     if (!strokes.length) { showMessage($('ref-message'), 'No swing was found. Check the whole body is visible and "Plays" is set correctly.', 'error'); return; }
     const items = strokes.map((contact) => {
       const full = A.cutStroke(res.seq, contact, 'auto');
-      const detected = A.classifyStroke(full, { hand });
+      const detected = A.detectShot(full, { hand, view: $('ref-view').value });
       return { contact, full, shot: shot === 'auto' ? detected.shot : shot };
     });
     if (refDraft.clip?.video) URL.revokeObjectURL(refDraft.clip.video.src);
@@ -702,7 +865,7 @@ async function pickRefStroke(i) {
 
 function renderRefDraft() {
   const d = refDraft.current, clip = refDraft.clip;
-  d.analysis = A.analyzeStroke(d.stroke, { shot: d.shot, hand: clip.hand });
+  d.analysis = A.analyzeStroke(d.stroke, { shot: d.shot, hand: clip.hand, view: $('ref-view').value });
   refViewer.setData({
     student: { analysis: d.analysis, frames: d.stroke.frames, width: d.width, height: d.height, images: d.images, label: `${$('ref-player').value || 'Reference'} · ${SHOT_BY_ID[d.shot].name}` },
     ref: null, phases: SHOT_BY_ID[d.shot].phases,
@@ -834,16 +997,15 @@ async function importClip(file, filePath, opts, est, signal, onProgress) {
     if (video.duration > 90) return { status: 'skip', text: 'Longer than 90 s' };
     const res = await processClip(video, est, { fps: 30, timeScale: opts.timeScale, signal, onProgress });
     const hint = named || 'auto';
-    let contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint });
-    if (!contacts.length) contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, sensitivity: 2.5, relative: 0.3 });
+    let contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, view: opts.view });
+    if (!contacts.length) contacts = A.detectStrokes(res.seq, { hand: opts.hand, shot: hint, view: opts.view, sensitivity: 2.5, relative: 0.3 });
     if (!contacts.length) return { status: 'fail', text: 'No swing found' };
     // One reference per clip: the strongest stroke.
-    const v = A.speedSeries(res.seq.frames, opts.hand === 'L' ? 9 : 10, res.seq.fps, A.torsoLength(res.seq.frames));
-    const contact = contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
+    const contact = A.strongestStroke(res.seq, contacts, opts.hand);
     const full = A.cutStroke(res.seq, contact, 'auto');
-    const shot = named || A.classifyStroke(full, { hand: opts.hand }).shot;
+    const shot = named || A.detectShot(full, { hand: opts.hand, view: opts.view }).shot;
     const { range, stroke } = A.recut(full, shot);
-    const analysis = A.analyzeStroke(stroke, { shot, hand: opts.hand });
+    const analysis = A.analyzeStroke(stroke, { shot, hand: opts.hand, view: opts.view });
     let images = null;
     if (opts.keepFrames) images = await extractFrames(video, stroke.frames.map((_, k) => res.videoTime(full.offset + range[0] + k)));
     const base = filePath.replace(/\.[^./]+$/, '').split('/').slice(-2).join(' / ');
@@ -977,6 +1139,24 @@ $('ref-list').addEventListener('click', async (e) => {
     refreshSetup();
     renderLibrary();
   }
+});
+
+$('starter-btn').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  showMessage($('library-message'), 'Adding starter references…');
+  try {
+    const res = await fetch('library/starter.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`the file could not be loaded (${res.status})`);
+    const r = await store.importAll(await res.json());
+    await store.requestPersistence();
+    await reloadData();
+    refAnalyses.clear();
+    renderLibrary();
+    showMessage($('library-message'), `Added ${r.refs} starter references. Strokes are now compared with the closest one for the shot and camera angle.`, 'ok');
+  } catch (err) {
+    showMessage($('library-message'), `Couldn't add the starter references: ${err.message}. Check the connection and try again.`, 'error');
+  } finally { btn.disabled = false; }
 });
 
 $('export-btn').addEventListener('click', async () => {

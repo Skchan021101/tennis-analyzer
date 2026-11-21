@@ -97,11 +97,29 @@
             <span class="pill" id="live-status">Starting camera…</span>
             <span class="pill pill-quiet" id="live-fps"></span>
           </div>
+          <div class="live-banner" id="live-banner" aria-live="polite" hidden>
+            <span class="lb-shot" id="lb-shot"></span>
+            <span class="lb-score" id="lb-score"></span>
+            <span class="lb-tip" id="lb-tip"></span>
+          </div>
+          <div class="live-tally" id="live-tally" hidden></div>
+          <figure class="live-replay" id="live-replay-box" hidden>
+            <canvas id="live-replay" aria-label="Slow-motion replay of the last stroke"></canvas>
+            <figcaption id="live-replay-cap">Replay</figcaption>
+          </figure>
         </div>
         <div class="live-controls">
           <button type="button" class="btn btn-secondary" id="live-pause" aria-pressed="false">Pause detection</button>
           <button type="button" class="btn btn-secondary" id="live-flip">Switch camera</button>
           <button type="button" class="btn btn-ghost" id="live-stop">Stop camera</button>
+          <label class="field inline">
+            <span class="label">Swing detection</span>
+            <select id="live-sensitivity">
+              <option value="0.75">Strict (fewer false strokes)</option>
+              <option value="1" selected>Normal</option>
+              <option value="1.4">Sensitive (slow or short swings)</option>
+            </select>
+          </label>
         </div>
         <p class="hint">Each swing is detected automatically and scored below. Keep the whole body in the frame.</p>
       </div>
@@ -134,6 +152,7 @@
               <p class="eyebrow" id="result-eyebrow"></p>
               <h2 class="result-title" id="result-title"></h2>
               <p class="result-sub" id="result-sub"></p>
+              <div class="shot-pick" id="shot-pick" hidden></div>
             </div>
           </div>
           <dl class="phase-bars" id="phase-bars"></dl>
@@ -166,11 +185,12 @@
                   <tbody></tbody>
                 </table>
               </div>
-              <p class="footnote">T = torso lengths (shoulders to hips). Heights are measured from the hips.</p>
+              <p class="footnote">T = torso lengths (shoulders to hips). Heights are measured from the hips. <span id="cp-view-note"></span></p>
             </section>
             <div class="result-actions">
               <button type="button" class="btn btn-primary" id="save-session">Save to history</button>
               <button type="button" class="btn btn-secondary" id="save-as-ref">Save as pro reference</button>
+              <button type="button" class="btn btn-danger" id="discard-stroke">Discard this stroke</button>
             </div>
             <div class="inline-form" id="save-ref-form" hidden>
               <label class="field"><span class="label">Reference name</span><input id="save-ref-name" maxlength="60" placeholder="e.g. Coach demo forehand"></label>
@@ -257,6 +277,13 @@
         </div>
       </form>
 
+      <div class="card starter">
+        <div>
+          <h2 class="card-title">Starter references</h2>
+          <p class="hint">94 skilled-player strokes for every shot except slice, side-on, from behind and from the front, from two open research datasets: <a href="https://github.com/jdpulgarin/Tennis-MoCap" target="_blank" rel="noopener">Tennis-MoCap</a> (CC BY-SA 3.0) and <a href="https://github.com/iasror/DatasetMvST" target="_blank" rel="noopener">MvST</a> (MIT). Skeletons only, no video. Adding them again replaces them rather than duplicating.</p>
+        </div>
+        <button type="button" class="btn btn-primary" id="starter-btn">Add starter references</button>
+      </div>
       <div class="library-tools">
         <button type="button" class="btn btn-ghost" id="export-btn">Export library and history</button>
         <label class="btn btn-ghost file-btn">Import<input type="file" id="import-input" accept="application/json,.json"></label>

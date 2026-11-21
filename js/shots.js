@@ -216,7 +216,7 @@ export const SHOT_BY_ID = Object.fromEntries(SHOTS.map((s) => [s.id, s]));
 
 // Capture window used when the shot type is detected automatically: long
 // enough for a serve, sensitive enough for a volley.
-export const AUTO = { id: 'auto', name: 'Auto-detect', pre: 1.8, post: 0.7, minSpeed: 3, film: 'Side-on, level with the hips, 4–6 m away, whole body in frame (with room above the head for serves).' };
+export const AUTO = { id: 'auto', name: 'Auto-detect', pre: 1.8, post: 0.7, minSpeed: 4, film: 'Side-on, level with the hips, 4–6 m away, whole body in frame (with room above the head for serves).' };
 export const shotConfig = (id) => SHOT_BY_ID[id] || AUTO;
 
 export const VIEWS = [

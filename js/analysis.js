@@ -3,6 +3,7 @@
 // Pure functions only (no DOM), so they run in the browser and in Node tests.
 
 import { SHOT_BY_ID, METRICS, metricCopy, formatMetric, shotConfig } from './shots.js';
+import { SHOT_MODELS } from './shotmodel.js';
 
 // MoveNet keypoint order (anatomical left/right of the player).
 export const KP = {
@@ -186,8 +187,52 @@ export function speedSeries(frames, kp, fps, torso) {
 }
 
 // ---------- stroke detection ----------
+export const MIN_STROKE_GAP = 1.6; // seconds between two strokes
+// Seen from the front much of the swing moves toward the camera, so the hand
+// looks slower on screen than it is.
+export const VIEW_SPEED = { side: 1, behind: 0.9, front: 0.7 };
+
+// Does a hand-speed peak look like a real swing? Rejects tracking glitches
+// (a point jumping for a frame or two), small movements (adjusting the grip,
+// bouncing the ball) and out-and-back jitter.
+export function strokeQuality(seq, contact, { hand = 'R', torso = null, v = null } = {}) {
+  const { frames, fps } = seq;
+  const n = frames.length;
+  torso = torso || torsoLength(frames);
+  const { wri } = handIdx(hand);
+  v = v || speedSeries(frames, wri, fps, torso);
+  const peak = v[contact];
+  // 1. The hand stays fast for a moment, not a single-frame spike.
+  let a = contact, b = contact;
+  while (a > 0 && v[a - 1] >= 0.5 * peak) a--;
+  while (b < n - 1 && v[b + 1] >= 0.5 * peak) b++;
+  const fastFrames = b - a + 1;
+  // 2. It travels far enough around contact (relative to the hips).
+  const rel = (i) => [frames[i][wri][0] - (frames[i][11][0] + frames[i][12][0]) / 2, frames[i][wri][1] - (frames[i][11][1] + frames[i][12][1]) / 2];
+  const from = Math.max(1, contact - Math.round(0.4 * fps)), to = Math.min(n - 1, contact + Math.round(0.3 * fps));
+  let travel = 0;
+  for (let i = from; i <= to; i++) travel += dist(rel(i), rel(i - 1)) / torso;
+  // 3. Through contact it keeps going one way instead of jumping out and back.
+  const c0 = Math.max(0, contact - Math.round(0.12 * fps)), c1 = Math.min(n - 1, contact + Math.round(0.12 * fps));
+  let path = 0;
+  for (let i = c0 + 1; i <= c1; i++) path += dist(rel(i), rel(i - 1));
+  const straightness = path > 0 ? dist(rel(c1), rel(c0)) / path : 0;
+  // 4. The hand was actually seen, not guessed.
+  const seenFrom = Math.max(0, contact - Math.round(0.2 * fps)), seenTo = Math.min(n - 1, contact + Math.round(0.2 * fps));
+  let conf = 0;
+  for (let i = seenFrom; i <= seenTo; i++) conf += frames[i][wri][2];
+  conf /= seenTo - seenFrom + 1;
+
+  const reasons = [];
+  if (fastFrames < Math.max(3, Math.round(0.08 * fps))) reasons.push('spike');
+  if (travel < 0.7) reasons.push('small'); // a volley punch is short
+  if (straightness < 0.6) reasons.push('jitter');
+  if (conf < 0.25) reasons.push('unseen');
+  return { ok: reasons.length === 0, reasons, peak, fastFrames, travel, straightness, conf };
+}
+
 // Returns contact frame indices (peaks of hitting-hand speed).
-export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity = 1, relative = 0.4 } = {}) {
+export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity = 1, relative = 0.4, view = 'side' } = {}) {
   const cfg = shotConfig(shot);
   const { frames, fps } = seq;
   if (frames.length < 5) return [];
@@ -195,9 +240,9 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
   const { wri } = handIdx(hand);
   const v = speedSeries(frames, wri, fps, torso);
   const peak = Math.max(...v);
-  const thresh = Math.max(cfg.minSpeed / sensitivity, peak * relative);
+  const thresh = Math.max((cfg.minSpeed * (VIEW_SPEED[view] || 1)) / sensitivity, peak * relative);
   const half = Math.max(2, Math.round(0.35 * fps));
-  const gap = Math.round(0.9 * fps);
+  const gap = Math.round(MIN_STROKE_GAP * fps);
   const candidates = [];
   for (let i = 1; i < v.length - 1; i++) {
     if (v[i] < thresh) continue;
@@ -205,14 +250,32 @@ export function detectStrokes(seq, { hand = 'R', shot = 'forehand', sensitivity 
     for (let k = Math.max(0, i - half); k <= Math.min(v.length - 1, i + half); k++) {
       if (v[k] > v[i] || (v[k] === v[i] && k < i)) { isMax = false; break; }
     }
-    if (isMax && bodyVisible(frames[i])) candidates.push(i);
+    if (isMax && bodyVisible(frames[i]) && strokeQuality(seq, i, { hand, torso, v }).ok) candidates.push(i);
   }
-  // Strongest peaks win; a weaker peak close to a stronger one (for example
-  // the take-back just before the forward swing) is dropped.
-  candidates.sort((a, b) => v[b] - v[a]);
+  return pickStrokes(candidates, v, gap, fps);
+}
+
+// The detected stroke with the fastest hand, or null.
+export function strongestStroke(seq, contacts, hand = 'R') {
+  if (!contacts.length) return null;
+  const v = speedSeries(seq.frames, hand === 'L' ? 9 : 10, seq.fps, torsoLength(seq.frames));
+  return contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
+}
+
+// Of hand-speed peaks closer together than the minimum gap, keep one. The
+// preparation (take-back, or toss and racquet drop on a serve) comes 0.6 s or
+// more before the hit and can be nearly as fast, so such a later peak wins if
+// it reaches 75% of the earlier one. Peaks right after each other (contact and
+// follow-through) keep the faster one.
+export function pickStrokes(candidates, v, gap, fps = 30) {
   const out = [];
-  for (const i of candidates) if (out.every((j) => Math.abs(i - j) >= gap)) out.push(i);
-  return out.sort((a, b) => a - b);
+  const prepGap = Math.round(0.6 * fps);
+  for (const i of [...candidates].sort((a, b) => a - b)) {
+    const last = out[out.length - 1];
+    if (last == null || i - last >= gap) out.push(i);
+    else if (i - last >= prepGap ? v[i] >= 0.75 * v[last] : v[i] > v[last]) out[out.length - 1] = i;
+  }
+  return out;
 }
 
 // Cut a stroke window around a contact frame.
@@ -276,7 +339,17 @@ function swingDirection(frames, wri, contact) {
   return dx < 0 ? -1 : 1;
 }
 
-export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
+// Checkpoints that a single camera can't measure from this angle. From the
+// front or behind, the swing toward the net runs along the camera's line of
+// sight, so 2D elbow and knee angles, "in front of the hips", trunk lean and
+// take-back depth are foreshortened and would be misleading.
+export const VIEW_UNRELIABLE = {
+  side: [],
+  behind: ['contactElbow', 'loadKnee', 'contactFront', 'trunkTilt', 'takeback'],
+  front: ['contactElbow', 'loadKnee', 'contactFront', 'trunkTilt', 'takeback'],
+};
+
+export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1, view = 'side' }) {
   const cfg = SHOT_BY_ID[shot];
   const { frames, fps } = stroke;
   const n = frames.length;
@@ -287,7 +360,8 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
 
   // Guard against the whole clip having left/right arms labelled the wrong
   // way round: the hitting hand should be the fast one (two-handers excepted).
-  if (shot !== 'backhand2') {
+  // (Side-on only: from the front or behind the other hand can look faster.)
+  if (shot !== 'backhand2' && view === 'side') {
     const other = speedSeries(frames, handIdx(h).owri, fps, torso);
     if (Math.max(...other) > 1.35 * Math.max(...v)) {
       h = h === 'L' ? 'R' : 'L';
@@ -320,8 +394,17 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
   // End of preparation.
   let prep = 0;
   if (cfg.prep === 'trophy') {
-    let best = Infinity;
-    for (let i = 0; i <= contact - 2; i++) if (kneeAngles[i] < best) { best = kneeAngles[i]; prep = i; }
+    // Trophy position: the tossing (or pointing) hand at its highest before
+    // the swing; visible from any angle. Deepest knee bend as a fallback.
+    let best = -Infinity;
+    for (let i = Math.max(0, contact - Math.round(1.6 * fps)); i <= contact - 2; i++) {
+      if (conf[i][C.offWri] < SEEN) continue;
+      if (canon[i][C.offWri][1] > best) { best = canon[i][C.offWri][1]; prep = i; }
+    }
+    if (best < 1.2) { // tossing arm not clearly up: fall back to the knees
+      best = Infinity;
+      for (let i = 0; i <= contact - 2; i++) if (kneeAngles[i] < best) { best = kneeAngles[i]; prep = i; }
+    }
     if (best === Infinity) {
       // Legs not visible: use the pause of the hand before the drive instead.
       let slow = Infinity;
@@ -378,8 +461,9 @@ export function analyzeStroke(stroke, { shot, hand = 'R', timeScale = 1 }) {
     tossArm: seen(prep, ['offWri']) ? within(canon[prep][C.offWri][1], -2, 3.6) : NaN,
   };
   for (const k of Object.keys(metrics)) if (!Number.isFinite(metrics[k])) metrics[k] = null;
+  for (const k of VIEW_UNRELIABLE[view] || []) metrics[k] = null;
 
-  return { shot, hand: h, handSwapped: h !== hand, dir, torso, fps, timeScale, events, canon, conf, metrics, n, legsHidden, armHidden };
+  return { shot, view, hand: h, handSwapped: h !== hand, dir, torso, fps, timeScale, events, canon, conf, metrics, n, legsHidden, armHidden };
 }
 
 // ---------- alignment & comparison ----------
@@ -470,10 +554,12 @@ export function compareStrokes(student, ref, samples = 60) {
 }
 
 // ---------- checkpoint evaluation & coaching tips ----------
-export function evaluate(studentMetrics, refMetrics, shotId, refName = 'the pro') {
+export function evaluate(studentMetrics, refMetrics, shotId, refName = 'the pro', view = 'side') {
   const cfg = SHOT_BY_ID[shotId];
   const rows = [];
+  const skip = new Set(VIEW_UNRELIABLE[view] || []);
   for (const [key, guide] of Object.entries(cfg.metrics)) {
+    if (skip.has(key)) continue; // can't be measured from this camera angle
     const m = METRICS[key];
     const s = studentMetrics[key];
     let target = null, targetText = '–', source = null;
@@ -596,4 +682,103 @@ export function recut(full, shot) {
   const a = Math.max(0, full.contact - Math.round(cfg.pre * full.fps));
   const b = Math.min(full.frames.length - 1, full.contact + Math.round(cfg.post * full.fps));
   return { range: [a, b], stroke: { ...full, frames: full.frames.slice(a, b + 1), contact: full.contact - a, offset: (full.offset || 0) + a, t0: (full.t0 || 0) + a / full.fps } };
+}
+
+// ---------- features for the learned shot recogniser ----------
+// Hand heights, sideways positions along the shoulder line, hand gap and
+// forward position at fixed times around contact, plus a few whole-stroke
+// measures. Used by js/shotmodel.js (trained on THETIS expert strokes).
+export const FEATURE_TIMES = [-1.2, -0.9, -0.6, -0.4, -0.2, 0, 0.2, 0.4];
+export function strokeFeatures(stroke, hand = 'R') {
+  const { frames, fps } = stroke;
+  const n = frames.length;
+  const torso = torsoLength(frames);
+  const { wri, owri } = handIdx(hand);
+  const v = speedSeries(frames, wri, fps, torso);
+  const contact = clamp(stroke.contact != null ? stroke.contact : v.indexOf(Math.max(...v)), 1, Math.max(1, n - 2));
+  const dir = swingDirection(frames, wri, contact);
+  const ix = canonIndices(hand);
+  const f = [];
+  for (const dt of FEATURE_TIMES) {
+    const i = clamp(contact + Math.round(dt * fps), 0, n - 1);
+    const p = frames[i];
+    const hip = mid(p[11], p[12]);
+    const sm = mid(p[ix.hitSho], p[ix.offSho]);
+    const axis = [p[ix.hitSho][0] - p[ix.offSho][0], p[ix.hitSho][1] - p[ix.offSho][1]];
+    const lat = (q) => ((q[0] - sm[0]) * axis[0] + (q[1] - sm[1]) * axis[1]) / (torso * torso);
+    f.push(
+      (hip[1] - p[wri][1]) / torso, // hitting hand height
+      (hip[1] - p[owri][1]) / torso, // other hand height
+      lat(p[wri]), // hitting hand along the shoulder line (+ = hitting side)
+      lat(p[owri]),
+      dist(p[wri], p[owri]) / torso, // gap between the hands
+      ((p[wri][0] - hip[0]) * dir) / torso, // hitting hand ahead of the hips
+    );
+  }
+  const shoW = frames.map((p) => dist(p[5], p[6]) / torso);
+  const pc = frames[contact];
+  // Serve vs overhead: a serve starts still with both hands low together and
+  // the tossing hand then goes up; an overhead usually involves moving.
+  const before = [];
+  for (let i = Math.max(0, contact - Math.round(1.6 * fps)); i <= Math.max(0, contact - Math.round(0.4 * fps)); i++) before.push(frames[i]);
+  const hipAt = (i) => mid(frames[clamp(i, 0, n - 1)][11], frames[clamp(i, 0, n - 1)][12]);
+  const moved = dist(hipAt(contact - Math.round(1.0 * fps)), hipAt(contact)) / torso;
+  const minGap = before.length ? Math.min(...before.map((p) => dist(p[wri], p[owri]) / torso)) : 0;
+  const maxOff = before.length ? Math.max(...before.map((p) => (hip0(p)[1] - p[owri][1]) / torso)) : 0;
+  f.push(moved, minGap, maxOff);
+  // Motion: hitting-hand velocity (forward, up) and hitting-elbow and knee
+  // angles through the swing.
+  for (const dt of [-0.5, -0.3, -0.15, 0, 0.15, 0.3]) {
+    const i = clamp(contact + Math.round(dt * fps), 1, n - 2);
+    const a = frames[i - 1], c2 = frames[i + 1];
+    const rel = (p) => [p[wri][0] - hip0(p)[0], p[wri][1] - hip0(p)[1]];
+    const ra = rel(a), rc = rel(c2);
+    f.push(((rc[0] - ra[0]) * dir * fps) / (2 * torso) / 10, ((ra[1] - rc[1]) * fps) / (2 * torso) / 10);
+    const p = frames[i];
+    f.push((angleAt(p[ix.hitSho], p[ix.hitElb], p[ix.hitWri]) || 0) / 180, (Math.min(angleAt(p[ix.hitHip], p[ix.hitKnee], p[ix.hitAnk]), angleAt(p[ix.offHip], p[ix.offKnee], p[ix.offAnk])) || 0) / 180);
+  }
+  f.push(
+    Math.min(...shoW) / (Math.max(...shoW) || 1),
+    angleAt(pc[ix.hitSho], pc[ix.hitElb], pc[ix.hitWri]) / 180 || 0,
+    Math.log(1 + v[contact]),
+    (hip0(pc)[1] - pc[0][1]) / torso, // head height
+  );
+  return f.map((x) => (Number.isFinite(x) ? x : 0));
+}
+const hip0 = (p) => mid(p[11], p[12]);
+
+// Apply a softmax shot model ({classes, mu, sd, W}) to a feature vector.
+// Returns the most likely shot, its probability and all probabilities.
+export function predictShot(model, x) {
+  const D = model.mu.length;
+  const xs = x.map((v, j) => (v - model.mu[j]) / model.sd[j]);
+  const layer = (W, input) => W.map((w) => {
+    let s = w[input.length];
+    for (let j = 0; j < input.length; j++) s += input[j] * w[j];
+    return s;
+  });
+  // 'mlp': one tanh hidden layer (W1, W2); otherwise plain softmax regression (W).
+  const z = model.type === 'mlp' ? layer(model.W2, layer(model.W1, xs).map(Math.tanh)) : layer(model.W, xs.slice(0, D));
+  const mx = Math.max(...z);
+  const ex = z.map((v) => Math.exp(v - mx));
+  const se = ex.reduce((a, b) => a + b, 0);
+  const p = ex.map((v) => v / se);
+  const k = p.indexOf(Math.max(...p));
+  return { shot: model.classes[k], confidence: p[k], probs: Object.fromEntries(model.classes.map((c, i) => [c, p[i]])) };
+}
+
+// Recognise the shot type of a captured stroke window with the model for the
+// camera angle (js/shotmodel.js, trained on real strokes). Below this
+// confidence the app asks instead of stating a shot: on players left out of
+// training, strokes above it were right 81-89% of the time, those below 40-54%.
+export const SURE = 0.7;
+export function detectShot(stroke, { hand = 'R', view = 'side' } = {}) {
+  const model = SHOT_MODELS && (SHOT_MODELS[view] || SHOT_MODELS.side);
+  if (model) {
+    const r = predictShot(model, strokeFeatures(stroke, hand));
+    const alternatives = Object.entries(r.probs).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([shot, p]) => ({ shot, p }));
+    return { shot: r.shot, confidence: r.confidence, sure: r.confidence >= SURE, alternatives, method: 'model' };
+  }
+  const rule = classifyStroke(stroke, { hand });
+  return { ...rule, sure: false, alternatives: [{ shot: rule.shot, p: rule.confidence }], method: 'rules' };
 }

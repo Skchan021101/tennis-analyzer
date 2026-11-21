@@ -10,16 +10,23 @@ with TensorFlow.js.
 ## What it does
 
 - **Automatic shot recognition.** Each swing is labelled as a forehand, two- or one-handed
-  backhand, slice, serve, forehand or backhand volley, or overhead, using body cues only. Examples:
-  hands together through contact means a two-handed backhand; the free hand still on the throat at
-  the end of the take-back means a backhand; the hand above the head at contact means a serve or
-  overhead. The comparison then uses the reference for that shot. Picking a shot yourself overrides
-  the detection, and also corrects a misread stroke.
+  backhand, slice, serve, forehand or backhand volley, or overhead by a small model trained on real
+  strokes, one per camera angle (see "Shot recognition" below). The comparison then uses the
+  references for that shot. When the model isn't sure, the result says so and offers its two best
+  guesses as one-tap fixes. Picking a shot yourself always overrides it.
 - **Live camera.** Point the camera at the student and start hitting. Each swing is detected
-  automatically and scored a moment later. The last 8 strokes of the session stay one tap away.
+  automatically and confirmed about 1.6 s later, once it's clear the movement was the hit and not
+  the preparation. A label pops up over the video (shot, score, main thing to work on), the hand's
+  path is drawn live, the last stroke loops in slow motion in a corner, and a running count of
+  strokes by type sits on the video. The last 8 strokes stay one tap away; any of them can be
+  discarded. A **Swing detection** setting (Strict / Normal / Sensitive) tunes how readily movements
+  count as strokes.
 - **Clips.** Upload a video, or record one with the phone's camera app. All strokes in the clip are
   found and you pick the one to review. Slow-motion clips (2×, 4×, 8×) are supported. Mark the
   speed so timing and hand-speed numbers are correct.
+- **Starter references.** One tap adds 94 skilled-player strokes (skeletons only) for every shot
+  except slice, side-on, from behind and from the front, built from two openly licensed research
+  datasets (see "Data" below).
 - **Pro library.** Add reference strokes from pro footage you have the right to use, or your own
   demonstrations. "Save as pro reference" turns any analyzed stroke into a reference.
 - **Bulk import.** Choose a whole folder (desktop) or several clips at once (phones too). Each clip
@@ -35,11 +42,50 @@ with TensorFlow.js.
   - Side-by-side video with skeletons, or both skeletons overlaid.
   - Up to three coaching points, plus a checkpoint table: knee bend, elbow at contact, contact
     height, contact in front, finish height, take-back, shoulder rotation, trunk lean, stance,
-    swing time, hand speed, and the tossing arm on serves.
+    swing time, hand speed, and the tossing arm on serves. With a front or behind camera, the
+    angle-dependent ones (elbow and knee angles, contact in front, trunk lean, take-back) are left
+    out because a single camera can't measure them from there.
 - **Without a reference,** the same checkpoints are checked against rough guide ranges for each
   shot.
 - **History.** Save analyses per student to track progress. Export and import the library and
   history as a JSON file to move them to another device or share them with another coach.
+
+## Shot recognition
+
+The shot type is recognised by three small networks in `js/shotmodel.js`, one per camera angle,
+trained on real strokes (`tools/training` rebuilds them). Measured on players left out of
+training (6-fold, players never mixed between training and testing):
+
+| Camera angle | Strokes | Right overall | Right when confident (≥ 70%) | Weakest shots |
+| --- | --- | --- | --- | --- |
+| Side-on | 971 from 24 players | 83.5% | 87% (90% of strokes) | one-handed backhand 48%, serve 70% |
+| Behind | 967 from 24 players | 83.1% | 87% (89% of strokes) | one-handed backhand 52%, serve 74% |
+| Front | 1,989 from 60 players | 66.1% | 73% (76% of strokes) | slice 38%, one-handed backhand 38%, serve 57% |
+
+The hand-written rules used before got 39–46% right on the same strokes.
+
+End to end on THETIS beginners p10–p20, who were kept out of training entirely (front camera, no
+ball, 17 fps): a stroke was found in 79% of clips, the shot was right 55% of the time, and 68% when
+the model was confident. **Front-view footage of beginners is the weakest case**, partly because a
+server standing sideways to a front camera hides one arm behind the other. Film side-on when you
+can.
+
+What the numbers don't cover: none of the test footage is your own (your camera, your court, a real
+ball). Slice has no side-on or behind training data at all, and one-handed backhands come from only
+a few players. When a stroke is misread, the one-tap fix or the shot chips correct it.
+
+## Data
+
+| Source | What's used | Licence |
+| --- | --- | --- |
+| [Tennis-MoCap](https://github.com/jdpulgarin/Tennis-MoCap) | 3D motion capture of 17 players (5 high-performance), 6 strokes, cut into single strokes and rendered side-on, from behind and from the front | CC BY-SA 3.0 |
+| [MvST](https://github.com/iasror/DatasetMvST) | Forehands and backhands of 8 players, side-on and from behind | MIT |
+| [THETIS](https://github.com/THETIS-dataset/dataset) | Front-view videos of 55 players and 12 strokes, tracked with the app's pose model | No licence file; cite the authors |
+
+The starter references use only Tennis-MoCap (high-performance players) and MvST (trained
+players). THETIS references can be built with `tools/training` and imported by hand. Because they
+derive from Tennis-MoCap, `js/shotmodel.js` and `library/starter.json` are CC BY-SA 3.0. See
+`NOTICE.md`.
 
 ## Reference clips from the THETIS dataset
 
@@ -103,7 +149,9 @@ generated strokes. They need Node 22 or later.
 | File | Role |
 | --- | --- |
 | `js/pose.js` | MoveNet in TensorFlow.js. Thunder (accurate) is used for clips and Lightning (fast) for the live camera. A crop region follows the player, so a small figure in a wide shot still gets enough pixels. |
-| `js/capture.js` | Steps through clips frame by frame. The live camera loop keeps a 4-second buffer and detects each stroke when the hand-speed peak passes. |
+| `js/capture.js` | Steps through clips frame by frame. The live camera loop keeps a 5.5-second buffer and confirms each stroke 1.6 s after its hand-speed peak, so a hit that follows the preparation replaces it. |
+| `js/shotmodel.js` | The trained shot recognisers (one per camera angle) and their measured accuracy. |
+| `library/starter.json` | The built-in starter references. |
 | `js/analysis.js` | Cleans the tracks: fixes left/right swaps, fills gaps, smooths and resamples. Also finds strokes, events and metrics, and handles alignment and scoring. Pure functions, unit-tested in Node. |
 | `js/shots.js` | Shot definitions, checkpoint metrics, guide ranges and coaching copy. Edit this file to tune targets or wording. |
 | `js/viewer.js` | Synced side-by-side and overlay playback. |
@@ -121,9 +169,11 @@ The measurements are 2D, taken from one camera:
 
 - **One player in frame.** The model tracks the most prominent person, so keep other players out
   of the shot.
-- **Shot recognition is rule-based**, tuned on generated strokes, not on real footage. It needs the
-  whole body in view. Forehand/backhand topspin vs slice is the least reliable call. If it guesses
-  wrong, pick the shot by hand.
+- **Shot recognition is roughly 83% right side-on or from behind, 66% from the front**, on players
+  it wasn't trained on (see above). It needs the whole body in view. Slice and one-handed
+  backhand are the least reliable calls. If it guesses wrong, pick the shot by hand.
+- **A preparation movement can still count as a stroke** when it is much faster than the hit
+  (for example a shadow swing without a ball). Discard it, or set Swing detection to Strict.
 - **Checkpoints need visible joints.** A checkpoint is skipped when the joints it measures weren't
   clearly seen, for example knees out of frame.
 - **The racquet isn't tracked.** Contact is estimated from the hand-speed peak, and you can

@@ -93,3 +93,60 @@ test('running across the court without swinging is not a stroke', () => {
   const seq = A.buildSequence(samples, { fps: 30 });
   assert.deepEqual(A.detectStrokes(seq, { hand: 'R', shot: 'forehand' }), []);
 });
+
+test('tracking glitches and small movements are not strokes', () => {
+  const base = makeDemoSamples('pro')[0].kps;
+  // Standing still with the hand jumping away for one frame (a tracking glitch).
+  const glitch = Array.from({ length: 60 }, (_, i) => ({
+    t: i / 30,
+    kps: base.map((p, j) => (j === 10 && i === 30 ? [p[0] + 120, p[1] - 60, 0.4] : p)),
+  }));
+  assert.deepEqual(A.detectStrokes(A.buildSequence(glitch, { fps: 30 }), { hand: 'R', shot: 'auto' }), []);
+  // A quick small flick of the hand (e.g. adjusting the grip).
+  const flick = Array.from({ length: 60 }, (_, i) => ({
+    t: i / 30,
+    kps: base.map((p, j) => (j === 10 ? [p[0] + 25 * Math.exp(-(((i - 30) / 2) ** 2)), p[1], p[2]] : p)),
+  }));
+  assert.deepEqual(A.detectStrokes(A.buildSequence(flick, { fps: 30 }), { hand: 'R', shot: 'auto' }), []);
+});
+
+test('two swings in a rally are counted once each', () => {
+  // Swing, hold the finish briefly, recover to the ready position over half a
+  // second, swing again: contacts about 2.3 s apart, as in a fast rally.
+  const one = makeDemoSamples('pro');
+  const end = one[one.length - 1], start = one[0];
+  const recover = [];
+  for (let k = 1; k <= 24; k++) {
+    const f = Math.max(0, (k - 9) / 15); // 0.3 s hold, then 0.5 s back to ready
+    recover.push({ t: end.t + k / 30, kps: end.kps.map((p, j) => [p[0] + (start.kps[j][0] - p[0]) * f, p[1] + (start.kps[j][1] - p[1]) * f, p[2]]) });
+  }
+  const shift = recover[recover.length - 1].t + 1 / 30;
+  const seqAll = [...one, ...recover, ...one.map((s) => ({ t: s.t + shift, kps: s.kps }))];
+  const seq = A.buildSequence(seqAll, { fps: 30 });
+  const found = A.detectStrokes(seq, { hand: 'R', shot: 'auto' });
+  assert.equal(found.length, 2, `found ${found}`);
+  assert.ok(Math.abs((found[1] - found[0]) / 30 - shift) < 0.1);
+});
+
+test('a preparation movement just before the hit is not counted as its own stroke', () => {
+  const v = Array(120).fill(0);
+  const bump = (at, h) => { for (let k = -4; k <= 4; k++) v[at + k] = Math.max(v[at + k], h * (1 - Math.abs(k) / 5)); };
+  bump(30, 9); // fast take-back / toss
+  bump(60, 8); // the hit, 1.0 s later and a little slower
+  assert.deepEqual(A.pickStrokes([30, 60], v, 48, 30), [60]);
+  // A follow-through peak right after contact keeps the faster one.
+  assert.deepEqual(A.pickStrokes([60, 70], v.map((x, i) => (i === 70 ? 6 : x)), 48, 30), [60]);
+});
+
+test('checkpoints that a front or behind camera cannot measure are left out', () => {
+  const { stroke } = analyzeDemo('pro');
+  for (const view of ['front', 'behind']) {
+    const an = A.analyzeStroke(stroke, { shot: 'forehand', hand: 'R', view });
+    for (const k of A.VIEW_UNRELIABLE[view]) assert.equal(an.metrics[k], null, `${view} ${k}`);
+    const ev = A.evaluate(an.metrics, null, 'forehand', 'the reference', view);
+    assert.ok(ev.rows.every((r) => !A.VIEW_UNRELIABLE[view].includes(r.key)));
+    assert.ok(ev.rows.some((r) => r.key === 'contactHeight'), 'heights are still checked');
+  }
+  const side = A.analyzeStroke(stroke, { shot: 'forehand', hand: 'R', view: 'side' });
+  assert.ok(side.metrics.contactElbow != null && side.metrics.loadKnee != null);
+});
