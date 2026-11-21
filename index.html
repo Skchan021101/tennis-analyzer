@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Stroke Match</title>
+  <meta name="description" content="Film a student's tennis strokes and compare them with a pro reference, frame by frame.">
+  <meta name="theme-color" content="#173a5c">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#analyze" aria-label="Stroke Match home">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="5" width="26" height="22" rx="2"/><path d="M3 11h26M3 21h26M16 11v10"/></svg>
+        <span>Stroke Match</span>
+      </a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="#analyze" data-tab="analyze">Analyze</a>
+        <a href="#library" data-tab="library">Pro library</a>
+        <a href="#history" data-tab="history">History</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ANALYZE -->
+    <section id="view-analyze" class="view" aria-labelledby="analyze-title">
+      <h1 id="analyze-title" class="sr-only">Analyze a stroke</h1>
+
+      <form class="setup card" id="setup" autocomplete="off">
+        <div class="field-row">
+          <label class="field grow">
+            <span class="label">Student</span>
+            <input id="student-name" name="student" list="student-list" placeholder="Student's name" maxlength="60">
+            <datalist id="student-list"></datalist>
+          </label>
+          <fieldset class="field">
+            <legend class="label">Plays</legend>
+            <div class="seg" role="radiogroup">
+              <label><input type="radio" name="hand" value="R" id="hand-r" checked><span>Right</span></label>
+              <label><input type="radio" name="hand" value="L" id="hand-l"><span>Left</span></label>
+            </div>
+          </fieldset>
+        </div>
+
+        <fieldset class="field">
+          <legend class="label">Shot</legend>
+          <div class="chips" id="shot-chips" role="radiogroup"></div>
+        </fieldset>
+
+        <div class="field-row">
+          <label class="field">
+            <span class="label">Camera angle</span>
+            <select id="view-select"></select>
+          </label>
+          <label class="field grow">
+            <span class="label">Compare with</span>
+            <select id="ref-select"></select>
+          </label>
+        </div>
+        <p class="film-tip" id="film-tip"></p>
+      </form>
+
+      <div class="capture-bar">
+        <button type="button" class="btn btn-primary" id="live-start">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/></svg>
+          Start live camera
+        </button>
+        <label class="btn btn-secondary file-btn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 9l5-5 5 5M5 19h14"/></svg>
+          Upload or record a clip
+          <input type="file" id="clip-input" accept="video/*" capture="environment">
+        </label>
+        <label class="field inline">
+          <span class="label">Clip speed</span>
+          <select id="slowmo">
+            <option value="1">Normal speed</option>
+            <option value="2">Slow-mo 2× (60 fps)</option>
+            <option value="4">Slow-mo 4× (120 fps)</option>
+            <option value="8">Slow-mo 8× (240 fps)</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="live card" id="live" hidden>
+        <div class="live-stage">
+          <video id="live-video" playsinline muted></video>
+          <canvas id="live-overlay"></canvas>
+          <div class="hud">
+            <span class="pill" id="live-status">Starting camera…</span>
+            <span class="pill pill-quiet" id="live-fps"></span>
+          </div>
+        </div>
+        <div class="live-controls">
+          <button type="button" class="btn btn-secondary" id="live-pause" aria-pressed="false">Pause detection</button>
+          <button type="button" class="btn btn-secondary" id="live-flip">Switch camera</button>
+          <button type="button" class="btn btn-ghost" id="live-stop">Stop camera</button>
+        </div>
+        <p class="hint">Each swing is detected automatically and scored below. Keep the whole body in the frame.</p>
+      </div>
+
+      <div class="card progress" id="progress" hidden>
+        <div class="progress-head">
+          <span id="progress-text">Loading the pose model…</span>
+          <button type="button" class="btn btn-ghost" id="progress-cancel">Cancel</button>
+        </div>
+        <div class="bar"><div class="bar-fill" id="progress-fill"></div></div>
+      </div>
+
+      <div class="message" id="analyze-message" role="status" hidden></div>
+
+      <div class="stroke-strip" id="stroke-strip" hidden>
+        <span class="label" id="stroke-strip-label">Strokes</span>
+        <div class="chips" id="stroke-chips"></div>
+      </div>
+
+      <article class="result" id="result" hidden>
+        <div class="example-note" id="example-note" hidden>
+          Example comparison with generated stick figures, not real players. Start the camera or upload a clip to analyze your student.
+        </div>
+        <header class="result-head">
+          <div class="score" id="score-block">
+            <div class="score-ring" id="score-ring" style="--p:0">
+              <span class="score-num" id="score-num">–</span>
+            </div>
+            <div class="score-meta">
+              <p class="eyebrow" id="result-eyebrow"></p>
+              <h2 class="result-title" id="result-title"></h2>
+              <p class="result-sub" id="result-sub"></p>
+            </div>
+          </div>
+          <dl class="phase-bars" id="phase-bars"></dl>
+        </header>
+
+        <div class="result-grid">
+          <div class="result-viewer">
+            <div id="viewer"></div>
+            <div class="contact-adjust">
+              <span class="label">Contact frame</span>
+              <button type="button" class="btn btn-icon btn-small" id="contact-prev" aria-label="Move contact one frame earlier">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+              </button>
+              <button type="button" class="btn btn-small btn-ghost" id="contact-show">Show contact</button>
+              <button type="button" class="btn btn-icon btn-small" id="contact-next" aria-label="Move contact one frame later">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="result-side">
+            <section aria-labelledby="tips-title">
+              <h3 id="tips-title" class="section-title">Coaching points</h3>
+              <ol class="tips" id="tips"></ol>
+            </section>
+            <section aria-labelledby="cp-title">
+              <div class="section-head"><h3 id="cp-title" class="section-title">Checkpoints</h3><button type="button" class="btn btn-ghost btn-small" id="toggle-help" aria-pressed="false">Explain</button></div>
+              <div class="table-wrap">
+                <table class="checkpoints" id="checkpoints">
+                  <thead><tr><th scope="col">Checkpoint</th><th scope="col">Student</th><th scope="col" id="target-col">Pro</th><th scope="col"><span class="sr-only">Status</span></th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p class="footnote">T = torso lengths (shoulders to hips). Heights are measured from the hips.</p>
+            </section>
+            <div class="result-actions">
+              <button type="button" class="btn btn-primary" id="save-session">Save to history</button>
+              <button type="button" class="btn btn-secondary" id="save-as-ref">Save as pro reference</button>
+            </div>
+            <div class="inline-form" id="save-ref-form" hidden>
+              <label class="field"><span class="label">Reference name</span><input id="save-ref-name" maxlength="60" placeholder="e.g. Coach demo forehand"></label>
+              <div class="row-gap">
+                <button type="button" class="btn btn-primary btn-small" id="save-ref-confirm">Save reference</button>
+                <button type="button" class="btn btn-ghost btn-small" id="save-ref-cancel">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- LIBRARY -->
+    <section id="view-library" class="view" aria-labelledby="library-title" hidden>
+      <div class="view-head">
+        <h1 id="library-title">Pro library</h1>
+        <p class="lede">Reference strokes you compare students against. Add a clip of a pro (footage you have the right to use) or your own demonstration, filmed from the same angle you'll film students.</p>
+      </div>
+
+      <form class="card add-ref" id="add-ref" autocomplete="off">
+        <h2 class="card-title">Add a reference</h2>
+        <div class="field-row">
+          <label class="field"><span class="label">Shot</span><select id="ref-shot"></select></label>
+          <label class="field grow"><span class="label">Player or label</span><input id="ref-player" maxlength="60" placeholder="e.g. Pro forehand, side-on"></label>
+        </div>
+        <div class="field-row">
+          <fieldset class="field">
+            <legend class="label">Plays</legend>
+            <div class="seg" role="radiogroup">
+              <label><input type="radio" name="ref-hand" value="R" id="ref-hand-r" checked><span>Right</span></label>
+              <label><input type="radio" name="ref-hand" value="L" id="ref-hand-l"><span>Left</span></label>
+            </div>
+          </fieldset>
+          <label class="field"><span class="label">Camera angle</span><select id="ref-view"></select></label>
+          <label class="field"><span class="label">Clip speed</span>
+            <select id="ref-slowmo">
+              <option value="1">Normal speed</option>
+              <option value="2">Slow-mo 2×</option>
+              <option value="4">Slow-mo 4×</option>
+              <option value="8">Slow-mo 8×</option>
+            </select>
+          </label>
+        </div>
+        <label class="btn btn-primary file-btn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 9l5-5 5 5M5 19h14"/></svg>
+          Choose reference clip
+          <input type="file" id="ref-input" accept="video/*">
+        </label>
+        <div class="card progress flat" id="ref-progress" hidden>
+          <div class="progress-head"><span id="ref-progress-text"></span><button type="button" class="btn btn-ghost" id="ref-progress-cancel">Cancel</button></div>
+          <div class="bar"><div class="bar-fill" id="ref-progress-fill"></div></div>
+        </div>
+        <div class="message" id="ref-message" role="status" hidden></div>
+        <div id="ref-pick" hidden>
+          <div class="stroke-strip"><span class="label">Strokes found</span><div class="chips" id="ref-stroke-chips"></div></div>
+          <div id="ref-viewer"></div>
+          <div class="contact-adjust">
+            <span class="label">Contact frame</span>
+            <button type="button" class="btn btn-icon btn-small" id="ref-contact-prev" aria-label="Move contact one frame earlier"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+            <button type="button" class="btn btn-small btn-ghost" id="ref-contact-show">Show contact</button>
+            <button type="button" class="btn btn-icon btn-small" id="ref-contact-next" aria-label="Move contact one frame later"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+          </div>
+          <button type="button" class="btn btn-primary" id="ref-save">Save to library</button>
+        </div>
+      </form>
+
+      <div class="library-tools">
+        <button type="button" class="btn btn-ghost" id="export-btn">Export library and history</button>
+        <label class="btn btn-ghost file-btn">Import<input type="file" id="import-input" accept="application/json,.json"></label>
+      </div>
+      <div class="message" id="library-message" role="status" hidden></div>
+      <div id="ref-list" class="ref-list"></div>
+    </section>
+
+    <!-- HISTORY -->
+    <section id="view-history" class="view" aria-labelledby="history-title" hidden>
+      <div class="view-head">
+        <h1 id="history-title">History</h1>
+        <p class="lede">Saved analyses, newest first. Scores compare against the reference used at the time.</p>
+      </div>
+      <label class="field narrow"><span class="label">Student</span><select id="history-filter"><option value="">All students</option></select></label>
+      <div id="history-list" class="history-list"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Runs entirely in this browser. Video never leaves the device. Pose model: MoveNet (Google, Apache 2.0).</p>
+  </footer>
+
+  <script src="vendor/tf-4.22.0.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

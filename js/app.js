@@ -1,0 +1,790 @@
+import { SHOTS, SHOT_BY_ID, VIEWS } from './shots.js';
+import * as A from './analysis.js';
+import { createEstimator } from './pose.js';
+import { openVideo, processClip, extractFrames, bitmapsToBlobs, blobsToBitmaps, LiveSession } from './capture.js';
+import * as store from './store.js';
+import { StrokeViewer } from './viewer.js';
+import { makeDemoSamples, DEMO_SIZE } from './demo.js';
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
+const fmtTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
+const fmtDate = (ms) => new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+// ---------- preferences (per device) ----------
+const PREF_KEY = 'stroke-match-prefs';
+const prefs = (() => { try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch { return {}; } })();
+const savePrefs = () => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch { /* ignore */ } };
+
+const state = {
+  shot: SHOT_BY_ID[prefs.shot] ? prefs.shot : 'forehand',
+  hand: prefs.hand === 'L' ? 'L' : 'R',
+  view: VIEWS.some((v) => v.id === prefs.view) ? prefs.view : 'side',
+  student: prefs.student || '',
+  refs: [],
+  sessions: [],
+  current: null,
+  clip: null,
+  liveStrokes: [],
+  live: null,
+  refBitmaps: new Map(),
+  busy: null,
+};
+
+// ---------- pose models ----------
+const estimators = {};
+async function getEstimator(kind, onStatus) {
+  if (!estimators[kind]) {
+    onStatus?.(kind === 'thunder' ? 'Loading the accurate pose model (12 MB, first time only)…' : 'Loading the fast pose model…');
+    estimators[kind] = createEstimator(kind).catch((e) => { delete estimators[kind]; throw e; });
+  }
+  return estimators[kind];
+}
+
+// ---------- messages & progress ----------
+function showMessage(el, text, kind = '') {
+  el.textContent = text;
+  el.className = `message ${kind}`;
+  el.hidden = !text;
+}
+function setProgress(prefix, text, frac) {
+  $(`${prefix}progress`).hidden = false;
+  $(`${prefix}progress-text`).textContent = text;
+  $(`${prefix}progress-fill`).style.width = `${Math.round((frac || 0) * 100)}%`;
+}
+const hideProgress = (prefix) => { $(`${prefix}progress`).hidden = true; };
+
+// ---------- tabs ----------
+function route() {
+  const tab = (location.hash || '#analyze').slice(1);
+  const valid = ['analyze', 'library', 'history'].includes(tab) ? tab : 'analyze';
+  for (const t of ['analyze', 'library', 'history']) $(`view-${t}`).hidden = t !== valid;
+  document.querySelectorAll('[data-tab]').forEach((a) => {
+    if (a.dataset.tab === valid) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+  if (valid === 'library') renderLibrary();
+  if (valid === 'history') renderHistory();
+  if (valid === 'analyze') viewer.resize();
+}
+window.addEventListener('hashchange', route);
+
+// ---------- setup form ----------
+function buildSetup() {
+  $('shot-chips').innerHTML = SHOTS.map((s) => `
+    <label class="chip"><input type="radio" name="shot" value="${s.id}" ${s.id === state.shot ? 'checked' : ''}>${esc(s.name)}</label>`).join('');
+  const viewOpts = VIEWS.map((v) => `<option value="${v.id}">${v.name}</option>`).join('');
+  $('view-select').innerHTML = viewOpts;
+  $('view-select').value = state.view;
+  $('ref-view').innerHTML = viewOpts;
+  $('ref-shot').innerHTML = SHOTS.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  $('ref-shot').value = state.shot;
+  $(`hand-${state.hand.toLowerCase()}`).checked = true;
+  $('student-name').value = state.student;
+
+  $('shot-chips').addEventListener('change', (e) => {
+    state.shot = e.target.value; prefs.shot = state.shot; savePrefs();
+    $('ref-shot').value = state.shot;
+    refreshSetup();
+    if (state.live) state.live.config.shot = state.shot;
+    reanalyzeCurrent();
+  });
+  document.querySelectorAll('input[name="hand"]').forEach((r) => r.addEventListener('change', () => {
+    state.hand = r.value; prefs.hand = state.hand; savePrefs();
+    if (state.live) state.live.config.hand = state.hand;
+    reanalyzeCurrent();
+  }));
+  $('view-select').addEventListener('change', (e) => { state.view = e.target.value; prefs.view = state.view; savePrefs(); refreshSetup(); });
+  $('ref-select').addEventListener('change', (e) => {
+    prefs.refByShot = { ...(prefs.refByShot || {}), [state.shot]: e.target.value || 'none' };
+    savePrefs();
+    renderCurrent();
+  });
+  $('student-name').addEventListener('input', (e) => { state.student = e.target.value.trim(); prefs.student = state.student; savePrefs(); });
+  $('setup').addEventListener('submit', (e) => e.preventDefault());
+}
+
+function refsForShot(shot) { return state.refs.filter((r) => r.shot === shot).sort((a, b) => b.createdAt - a.createdAt); }
+
+function selectedRef() {
+  const id = $('ref-select').value;
+  return id ? state.refs.find((r) => r.id === id) || null : null;
+}
+
+function refreshSetup() {
+  const cfg = SHOT_BY_ID[state.shot];
+  $('film-tip').innerHTML = `<strong>Filming ${esc(cfg.name.toLowerCase())}:</strong> ${esc(cfg.film)}`;
+  const refs = refsForShot(state.shot);
+  const sel = $('ref-select');
+  sel.innerHTML = refs.map((r) => `<option value="${r.id}">${esc(r.label)} · ${viewName(r.view)}${r.view !== state.view ? ' (different angle)' : ''}</option>`).join('')
+    + '<option value="">Guide ranges only (no reference)</option>';
+  const pref = prefs.refByShot?.[state.shot];
+  if (pref === 'none') sel.value = '';
+  else if (pref && refs.some((r) => r.id === pref)) sel.value = pref;
+  else sel.value = (refs.find((r) => r.view === state.view) || refs[0])?.id || '';
+  const names = new Set(state.sessions.map((s) => s.student).filter(Boolean));
+  $('student-list').innerHTML = [...names].sort().map((n) => `<option value="${esc(n)}"></option>`).join('');
+}
+
+// ---------- reference helpers ----------
+function refSide(ref) {
+  const stroke = { frames: ref.frames, fps: ref.fps, contact: ref.contact };
+  const analysis = A.analyzeStroke(stroke, { shot: ref.shot, hand: ref.hand });
+  return { analysis, frames: ref.frames, width: ref.width, height: ref.height, images: state.refBitmaps.get(ref.id) || null, label: ref.label };
+}
+
+async function loadRefBitmaps(ref) {
+  if (!ref?.images?.length || state.refBitmaps.has(ref.id)) return;
+  try { state.refBitmaps.set(ref.id, await blobsToBitmaps(ref.images)); } catch { state.refBitmaps.set(ref.id, null); }
+}
+
+async function reloadData() {
+  state.refs = await store.getAll('refs');
+  state.sessions = await store.getAll('sessions');
+  refreshSetup();
+}
+
+// ---------- current result ----------
+const viewer = new StrokeViewer($('viewer'));
+
+function setCurrent(cur) {
+  state.current = cur;
+  renderCurrent();
+}
+
+function analyzeCurrent() {
+  const c = state.current;
+  if (!c || c.source === 'demo') return;
+  c.analysis = A.analyzeStroke(c.stroke, { shot: state.shot, hand: state.hand });
+}
+
+function reanalyzeCurrent() {
+  if (!state.current || state.current.source === 'demo') return;
+  analyzeCurrent();
+  renderCurrent();
+}
+
+async function renderCurrent() {
+  const c = state.current;
+  if (!c) { $('result').hidden = true; return; }
+  const isDemo = c.source === 'demo';
+  const shotId = isDemo ? 'forehand' : state.shot;
+  const cfg = SHOT_BY_ID[shotId];
+  let refData = null;
+  if (isDemo) refData = c.demoRef;
+  else {
+    const ref = selectedRef();
+    if (ref) { await loadRefBitmaps(ref); refData = refSide(ref); }
+  }
+  const studentLabel = isDemo ? 'Demo student' : (state.student || 'Student');
+  const studentSide = { analysis: c.analysis, frames: c.stroke.frames, width: c.width, height: c.height, images: c.images, label: studentLabel };
+
+  $('result').hidden = false;
+  $('example-note').hidden = !isDemo;
+  $('save-session').hidden = isDemo;
+  $('save-as-ref').hidden = isDemo;
+  $('save-ref-form').hidden = true;
+  document.querySelector('.result .contact-adjust').hidden = isDemo;
+
+  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, refData?.label || 'the pro');
+  const cmp = refData ? A.compareStrokes(c.analysis, refData.analysis) : null;
+  c.evaluation = evalRes;
+  c.comparison = cmp;
+
+  // Score
+  const ring = $('score-ring'), num = $('score-num');
+  if (cmp) {
+    ring.style.setProperty('--p', cmp.score);
+    ring.style.setProperty('--ring', cmp.score >= 75 ? 'var(--good)' : cmp.score >= 55 ? 'var(--close)' : 'var(--work)');
+    num.textContent = String(cmp.score);
+    num.className = 'score-num';
+    ring.setAttribute('aria-label', `Match score ${cmp.score} out of 100`);
+  } else {
+    const p = evalRes.rated ? Math.round((100 * evalRes.onTarget) / evalRes.rated) : 0;
+    ring.style.setProperty('--p', p);
+    ring.style.setProperty('--ring', 'var(--court)');
+    num.textContent = `${evalRes.onTarget}/${evalRes.rated}`;
+    num.className = 'score-num small';
+    ring.setAttribute('aria-label', `${evalRes.onTarget} of ${evalRes.rated} checkpoints on target`);
+  }
+  $('result-eyebrow').textContent = `${studentLabel} · ${c.source === 'live' ? 'Live' : isDemo ? 'Example' : 'Clip'} · ${new Date(c.createdAt).toLocaleTimeString(undefined, { timeStyle: 'short' })}`;
+  $('result-title').textContent = cfg.name;
+  let sub = cmp ? `Match with ${refData.label}` : 'Checked against guide ranges. Add a pro reference for a match score.';
+  if (c.analysis.handSwapped) sub += ` · The hitting arm looked like the ${c.analysis.hand === 'L' ? 'left' : 'right'} one; check the "Plays" setting.`;
+  $('result-sub').textContent = sub;
+
+  const pb = $('phase-bars');
+  if (cmp) {
+    pb.hidden = false;
+    pb.innerHTML = [['prep', cfg.phases[0]], ['contact', cfg.phases[1]], ['finish', cfg.phases[2]]].map(([k, name]) => {
+      const v = cmp.phases[k];
+      const col = v >= 75 ? 'var(--good)' : v >= 55 ? 'var(--close)' : 'var(--work)';
+      return `<dt>${esc(name)}</dt><dd><div class="track"><div class="fill" style="width:${v}%;background:${col}"></div></div></dd><dd class="num">${v}</dd>`;
+    }).join('');
+  } else pb.hidden = true;
+
+  // Tips
+  $('tips').innerHTML = evalRes.tips.length
+    ? evalRes.tips.map((t) => `<li><span>${esc(t.text)}</span></li>`).join('')
+    : `<li class="good"><span>${evalRes.rated ? 'All checkpoints are within range of ' + esc(refData ? refData.label : 'the guide ranges') + '. Use the overlay to fine-tune the swing shape.' : 'No checkpoints could be measured. Make sure the whole body is visible.'}</span></li>`;
+
+  // Checkpoints
+  $('target-col').textContent = refData ? 'Reference' : 'Guide';
+  const statusText = { good: 'On target', close: 'Close', work: 'Work on', none: '–' };
+  document.querySelector('#checkpoints tbody').innerHTML = evalRes.rows.map((r) => `
+    <tr>
+      <td>${esc(r.label)}<span class="cp-help">${esc(r.help)}</span></td>
+      <td>${esc(r.studentText)}</td>
+      <td>${esc(r.targetText)}</td>
+      <td><span class="status ${r.status}">${statusText[r.status]}</span></td>
+    </tr>`).join('');
+
+  viewer.setData({ student: studentSide, ref: refData, phases: cfg.phases });
+}
+
+// ---------- demo ----------
+function showDemo() {
+  const mk = (kind) => {
+    const seq = A.buildSequence(makeDemoSamples(kind), { fps: 30, ...DEMO_SIZE });
+    const contact = A.detectStrokes(seq, { hand: 'R', shot: 'forehand' })[0];
+    const stroke = A.cutStroke(seq, contact, 'forehand');
+    return { stroke, analysis: A.analyzeStroke(stroke, { shot: 'forehand', hand: 'R' }) };
+  };
+  const pro = mk('pro'), stu = mk('student');
+  setCurrent({
+    source: 'demo', createdAt: Date.now(), stroke: stu.stroke, analysis: stu.analysis, images: null, ...DEMO_SIZE,
+    demoRef: { analysis: pro.analysis, frames: pro.stroke.frames, ...DEMO_SIZE, images: null, label: 'Demo pro' },
+  });
+}
+
+// ---------- contact adjust ----------
+function nudgeContact(delta) {
+  const c = state.current;
+  if (!c || c.source === 'demo') return;
+  const n = c.stroke.frames.length;
+  c.stroke = { ...c.stroke, contact: Math.max(1, Math.min(n - 2, c.analysis.events.contact + delta)) };
+  analyzeCurrent();
+  renderCurrent().then(() => viewer.jumpTo('contact'));
+}
+$('contact-prev').addEventListener('click', () => nudgeContact(-1));
+$('toggle-help').addEventListener('click', (e) => {
+  const on = $('checkpoints').classList.toggle('show-help');
+  e.currentTarget.setAttribute('aria-pressed', String(on));
+  e.currentTarget.textContent = on ? 'Hide explanations' : 'Explain';
+});
+$('contact-next').addEventListener('click', () => nudgeContact(1));
+$('contact-show').addEventListener('click', () => viewer.jumpTo('contact'));
+
+// ---------- clip analysis ----------
+let clipAbort = null;
+$('progress-cancel').addEventListener('click', () => clipAbort?.abort());
+
+async function analyzeClipFile(file) {
+  stopLive();
+  showMessage($('analyze-message'), '');
+  $('stroke-strip').hidden = true;
+  clipAbort = new AbortController();
+  const timeScale = +$('slowmo').value || 1;
+  try {
+    setProgress('', 'Loading the pose model…', 0);
+    const est = await getEstimator('thunder', (t) => setProgress('', t, 0));
+    setProgress('', 'Opening the clip…', 0);
+    const video = await openVideo(file);
+    if (video.duration > 90) throw new Error('That clip is longer than 90 seconds. Trim it to the strokes you want analyzed.');
+    const res = await processClip(video, est, {
+      fps: 30, timeScale, signal: clipAbort.signal,
+      onProgress: (i, n) => setProgress('', `Tracking the player: frame ${i} of ${n}`, i / n),
+    });
+    let strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot });
+    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand: state.hand, shot: state.shot, sensitivity: 2.5, relative: 0.3 });
+    hideProgress('');
+    if (state.clip?.video) URL.revokeObjectURL(state.clip.video.src);
+    state.clip = { video, ...res, strokes, timeScale };
+    if (!strokes.length) {
+      showMessage($('analyze-message'), 'No swing was found in this clip. Check that the whole body is in the frame, the "Plays" setting matches the student, and the clip includes the full stroke.', 'error');
+      return;
+    }
+    $('stroke-strip-label').textContent = strokes.length === 1 ? '1 stroke found' : `${strokes.length} strokes found`;
+    $('stroke-chips').innerHTML = strokes.map((c, i) => `<button type="button" class="chip" data-i="${i}" aria-pressed="${i === 0}">Stroke ${i + 1} · ${fmtTime(c / res.seq.fps + res.seq.t0)}</button>`).join('');
+    $('stroke-strip').hidden = false;
+    await selectClipStroke(0);
+  } catch (e) {
+    hideProgress('');
+    if (e.name !== 'AbortError') showMessage($('analyze-message'), e.message || String(e), 'error');
+  }
+}
+
+async function selectClipStroke(i) {
+  const clip = state.clip;
+  if (!clip) return;
+  $('stroke-chips').querySelectorAll('.chip').forEach((b) => b.setAttribute('aria-pressed', String(+b.dataset.i === i)));
+  const stroke = A.cutStroke(clip.seq, clip.strokes[i], state.shot);
+  setProgress('', 'Preparing frames…', 0.5);
+  const times = stroke.frames.map((_, k) => clip.videoTime(stroke.offset + k));
+  const images = await extractFrames(clip.video, times);
+  hideProgress('');
+  releaseCurrent();
+  state.current = { source: 'clip', createdAt: Date.now(), stroke, images, width: clip.width, height: clip.height };
+  analyzeCurrent();
+  await renderCurrent();
+}
+$('stroke-chips').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-i]');
+  if (!b) return;
+  if (state.clip) selectClipStroke(+b.dataset.i);
+  else selectLiveStroke(+b.dataset.i);
+});
+
+$('clip-input').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) analyzeClipFile(f);
+});
+
+function releaseCurrent() {
+  const c = state.current;
+  if (c && c.source === 'clip' && c.images) c.images.forEach((b) => b.close?.());
+}
+
+// ---------- live camera ----------
+let wakeLock = null;
+async function startLive() {
+  showMessage($('analyze-message'), '');
+  if (!window.isSecureContext) {
+    showMessage($('analyze-message'), 'The live camera only works when the app is opened over https:// (or on localhost). Upload a clip instead, or open the hosted version.', 'error');
+    return;
+  }
+  if (!LiveSession.supported()) {
+    showMessage($('analyze-message'), 'This browser doesn\'t give web pages camera access. Use "Upload or record a clip" instead.', 'error');
+    return;
+  }
+  if (state.live) return;
+  $('stroke-strip').hidden = true;
+  state.clip = null;
+  $('live').hidden = false;
+  $('live-status').textContent = 'Loading the pose model…';
+  $('live-status').className = 'pill';
+  try {
+    const est = await getEstimator('lightning');
+    const session = new LiveSession($('live-video'), $('live-overlay'));
+    session.config = { hand: state.hand, shot: state.shot, sensitivity: 1 };
+    session.addEventListener('frame', (e) => drawLiveOverlay(e.detail));
+    session.addEventListener('stroke', (e) => onLiveStroke(e.detail));
+    session.addEventListener('error', (e) => showMessage($('analyze-message'), `Pose tracking error: ${e.detail.message}`, 'error'));
+    state.live = session;
+    $('live-status').textContent = 'Starting camera…';
+    await session.start(est, 'environment');
+    document.querySelector('.live-stage').classList.toggle('mirror', session.facing === 'user');
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { wakeLock = null; }
+  } catch (e) {
+    const msg = e.name === 'NotAllowedError' ? 'Camera access was refused. Allow the camera for this site in the browser settings, or upload a clip instead.'
+      : e.name === 'NotFoundError' || e.name === 'OverconstrainedError' ? 'No camera was found on this device. Upload a clip instead.'
+        : e.message || String(e);
+    showMessage($('analyze-message'), msg, 'error');
+    stopLive();
+  }
+}
+
+function stopLive() {
+  if (!state.live) { $('live').hidden = true; return; }
+  for (const s of state.liveStrokes) state.live.release(s.bitmaps);
+  state.liveStrokes = [];
+  state.live.stop();
+  state.live = null;
+  $('live').hidden = true;
+  try { wakeLock?.release(); } catch { /* ignore */ }
+  wakeLock = null;
+  if (state.current?.source === 'live') { $('stroke-strip').hidden = true; }
+}
+
+function drawLiveOverlay({ kps, w, h, visible }) {
+  const cv = $('live-overlay');
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const lw = Math.max(2, w / 220);
+  ctx.lineCap = 'round';
+  for (const [a, b] of A.EDGES) {
+    if (kps[a][2] < 0.25 || kps[b][2] < 0.25) continue;
+    const hit = (state.hand === 'L' ? [7, 9, 5] : [8, 10, 6]);
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = lw + 3;
+    ctx.beginPath(); ctx.moveTo(kps[a][0], kps[a][1]); ctx.lineTo(kps[b][0], kps[b][1]); ctx.stroke();
+    ctx.strokeStyle = hit.includes(a) && hit.includes(b) ? '#e3f25a' : '#ffffff'; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(kps[a][0], kps[a][1]); ctx.lineTo(kps[b][0], kps[b][1]); ctx.stroke();
+  }
+  const st = $('live-status');
+  const paused = !state.live?.detecting;
+  if (paused) { st.textContent = 'Detection paused'; st.className = 'pill'; }
+  else if (visible) { st.textContent = `Tracking · ready for a ${SHOT_BY_ID[state.shot].name.toLowerCase()}`; st.className = 'pill ready'; }
+  else { st.textContent = 'Step into view: whole body in the frame'; st.className = 'pill warn'; }
+  const fps = state.live?.fpsEstimate;
+  $('live-fps').textContent = fps ? `${Math.round(fps)} fps` : '';
+  $('live-fps').hidden = !fps;
+}
+
+function onLiveStroke({ stroke, bitmaps, width, height }) {
+  const analysis = A.analyzeStroke(stroke, { shot: state.shot, hand: state.hand });
+  const entry = { stroke, bitmaps, width, height, analysis, createdAt: Date.now() };
+  state.liveStrokes.push(entry);
+  while (state.liveStrokes.length > 8) {
+    const old = state.liveStrokes.shift();
+    state.live?.release(old.bitmaps);
+  }
+  selectLiveStroke(state.liveStrokes.length - 1);
+}
+
+function selectLiveStroke(i) {
+  const s = state.liveStrokes[i];
+  if (!s) return;
+  state.current = { source: 'live', createdAt: s.createdAt, stroke: s.stroke, images: s.bitmaps, width: s.width, height: s.height, analysis: s.analysis, liveIndex: i };
+  analyzeCurrent();
+  s.stroke = state.current.stroke;
+  renderCurrent().then(() => {
+    s.score = state.current.comparison?.score;
+    $('stroke-strip-label').textContent = 'This session';
+    $('stroke-chips').innerHTML = state.liveStrokes.map((x, k) => `<button type="button" class="chip" data-i="${k}" aria-pressed="${k === i}">#${k + 1}${x.score != null ? ` <span class="chip-score">${x.score}</span>` : ''}</button>`).join('');
+    $('stroke-strip').hidden = false;
+    const st = $('live-status');
+    if (st) { st.textContent = `Stroke ${i + 1} captured${s.score != null ? ` · match ${s.score}` : ''}`; st.className = 'pill ready'; }
+  });
+}
+
+$('live-start').addEventListener('click', startLive);
+$('live-stop').addEventListener('click', stopLive);
+$('live-flip').addEventListener('click', async () => {
+  if (!state.live) return;
+  try {
+    await state.live.flip();
+    document.querySelector('.live-stage').classList.toggle('mirror', state.live.facing === 'user');
+  } catch (e) { showMessage($('analyze-message'), `Couldn't switch camera: ${e.message}`, 'error'); }
+});
+$('live-pause').addEventListener('click', (e) => {
+  if (!state.live) return;
+  state.live.detecting = !state.live.detecting;
+  e.currentTarget.setAttribute('aria-pressed', String(!state.live.detecting));
+  e.currentTarget.textContent = state.live.detecting ? 'Pause detection' : 'Resume detection';
+});
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && state.live && !wakeLock) {
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { wakeLock = null; }
+  }
+});
+
+// ---------- saving ----------
+async function contactThumb(c) {
+  const img = c.images?.[c.analysis.events.contact];
+  if (!img) return null;
+  const k = 160 / Math.max(img.width, img.height);
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  return new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.7));
+}
+
+const roundFrames = (frames) => frames.map((f) => f.map((p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(p[2] * 100) / 100]));
+
+$('save-session').addEventListener('click', async () => {
+  const c = state.current;
+  if (!c || c.source === 'demo') return;
+  const ref = selectedRef();
+  const rec = {
+    id: store.newId('ses'), createdAt: Date.now(), student: state.student || 'Student', shot: state.shot,
+    hand: c.analysis.hand, view: state.view, source: c.source,
+    refId: ref?.id || null, refLabel: ref?.label || null,
+    score: c.comparison?.score ?? null, phases: c.comparison?.phases || null,
+    onTarget: c.evaluation.onTarget, rated: c.evaluation.rated,
+    metrics: c.analysis.metrics, tips: c.evaluation.tips.map((t) => t.text),
+    thumb: await contactThumb(c),
+  };
+  try {
+    await store.put('sessions', rec);
+    store.requestPersistence();
+    state.sessions.push(rec);
+    refreshSetup();
+    showMessage($('analyze-message'), `Saved to ${rec.student}'s history.`, 'ok');
+  } catch (e) { showMessage($('analyze-message'), `Couldn't save: ${e.message}`, 'error'); }
+});
+
+$('save-as-ref').addEventListener('click', () => {
+  $('save-ref-form').hidden = false;
+  $('save-ref-name').value = `${state.student || 'Coach'} · ${SHOT_BY_ID[state.shot].name}`;
+  $('save-ref-name').focus();
+});
+$('save-ref-cancel').addEventListener('click', () => { $('save-ref-form').hidden = true; });
+$('save-ref-confirm').addEventListener('click', async () => {
+  const c = state.current;
+  if (!c) return;
+  await saveReference({
+    shot: state.shot, label: $('save-ref-name').value.trim() || SHOT_BY_ID[state.shot].name,
+    hand: c.analysis.hand, view: state.view, stroke: c.stroke, contact: c.analysis.events.contact,
+    width: c.width, height: c.height, images: c.images,
+  });
+  $('save-ref-form').hidden = true;
+  showMessage($('analyze-message'), 'Saved to the pro library. Pick it under "Compare with" to use it.', 'ok');
+});
+
+async function saveReference({ shot, label, hand, view, stroke, contact, width, height, images }) {
+  const rec = {
+    id: store.newId('ref'), createdAt: Date.now(), shot, label, hand, view,
+    fps: stroke.fps, width, height, contact, frames: roundFrames(stroke.frames),
+    images: images?.length ? await bitmapsToBlobs(images) : [],
+  };
+  await store.put('refs', rec);
+  store.requestPersistence();
+  state.refs.push(rec);
+  refreshSetup();
+  return rec;
+}
+
+// ---------- library ----------
+const refViewer = new StrokeViewer($('ref-viewer'));
+const refDraft = { clip: null, current: null };
+let refAbort = null;
+$('ref-progress-cancel').addEventListener('click', () => refAbort?.abort());
+
+$('ref-input').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  showMessage($('ref-message'), '');
+  $('ref-pick').hidden = true;
+  refAbort = new AbortController();
+  const shot = $('ref-shot').value;
+  const hand = document.querySelector('input[name="ref-hand"]:checked').value;
+  const timeScale = +$('ref-slowmo').value || 1;
+  try {
+    setProgress('ref-', 'Loading the pose model…', 0);
+    const est = await getEstimator('thunder', (t) => setProgress('ref-', t, 0));
+    const video = await openVideo(file);
+    if (video.duration > 90) throw new Error('That clip is longer than 90 seconds. Trim it to the strokes you want.');
+    const res = await processClip(video, est, {
+      fps: 30, timeScale, signal: refAbort.signal,
+      onProgress: (i, n) => setProgress('ref-', `Tracking the player: frame ${i} of ${n}`, i / n),
+    });
+    let strokes = A.detectStrokes(res.seq, { hand, shot });
+    if (!strokes.length) strokes = A.detectStrokes(res.seq, { hand, shot, sensitivity: 2.5, relative: 0.3 });
+    hideProgress('ref-');
+    if (!strokes.length) { showMessage($('ref-message'), 'No swing was found. Check the whole body is visible and "Plays" is set correctly.', 'error'); return; }
+    refDraft.clip = { video, ...res, strokes, shot, hand };
+    $('ref-stroke-chips').innerHTML = strokes.map((c, i) => `<button type="button" class="chip" data-i="${i}" aria-pressed="${i === 0}">Stroke ${i + 1} · ${fmtTime(c / res.seq.fps + res.seq.t0)}</button>`).join('');
+    $('ref-pick').hidden = false;
+    await pickRefStroke(0);
+  } catch (err) {
+    hideProgress('ref-');
+    if (err.name !== 'AbortError') showMessage($('ref-message'), err.message || String(err), 'error');
+  }
+});
+
+async function pickRefStroke(i) {
+  const clip = refDraft.clip;
+  $('ref-stroke-chips').querySelectorAll('.chip').forEach((b) => b.setAttribute('aria-pressed', String(+b.dataset.i === i)));
+  const stroke = A.cutStroke(clip.seq, clip.strokes[i], clip.shot);
+  const images = await extractFrames(clip.video, stroke.frames.map((_, k) => clip.videoTime(stroke.offset + k)));
+  refDraft.current?.images?.forEach((b) => b.close?.());
+  refDraft.current = { stroke, images, width: clip.width, height: clip.height };
+  renderRefDraft();
+}
+
+function renderRefDraft() {
+  const d = refDraft.current, clip = refDraft.clip;
+  d.analysis = A.analyzeStroke(d.stroke, { shot: clip.shot, hand: clip.hand });
+  refViewer.setData({
+    student: { analysis: d.analysis, frames: d.stroke.frames, width: d.width, height: d.height, images: d.images, label: $('ref-player').value || 'Reference' },
+    ref: null, phases: SHOT_BY_ID[clip.shot].phases,
+  });
+}
+
+$('ref-stroke-chips').addEventListener('click', (e) => { const b = e.target.closest('[data-i]'); if (b) pickRefStroke(+b.dataset.i); });
+const nudgeRef = (delta) => {
+  const d = refDraft.current;
+  if (!d) return;
+  d.stroke = { ...d.stroke, contact: Math.max(1, Math.min(d.stroke.frames.length - 2, d.analysis.events.contact + delta)) };
+  renderRefDraft();
+  refViewer.jumpTo('contact');
+};
+$('ref-contact-prev').addEventListener('click', () => nudgeRef(-1));
+$('ref-contact-next').addEventListener('click', () => nudgeRef(1));
+$('ref-contact-show').addEventListener('click', () => refViewer.jumpTo('contact'));
+$('ref-save').addEventListener('click', async () => {
+  const d = refDraft.current, clip = refDraft.clip;
+  if (!d) return;
+  try {
+    await saveReference({
+      shot: clip.shot, label: $('ref-player').value.trim() || `${SHOT_BY_ID[clip.shot].name} reference`,
+      hand: d.analysis.hand, view: $('ref-view').value, stroke: d.stroke, contact: d.analysis.events.contact,
+      width: d.width, height: d.height, images: d.images,
+    });
+    $('ref-pick').hidden = true;
+    URL.revokeObjectURL(clip.video.src);
+    refDraft.clip = null;
+    showMessage($('ref-message'), 'Saved. It is now available under "Compare with" for this shot.', 'ok');
+    renderLibrary();
+  } catch (e) { showMessage($('ref-message'), `Couldn't save: ${e.message}`, 'error'); }
+});
+$('add-ref').addEventListener('submit', (e) => e.preventDefault());
+
+function drawThumb(canvas, img, kps, w, h, hand) {
+  const W = canvas.width = 320, H = canvas.height = 240;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--stage').trim() || '#11273a';
+  ctx.fillRect(0, 0, W, H);
+  let tf;
+  if (img) {
+    const k = Math.min(W / img.width, H / img.height);
+    const dw = img.width * k, dh = img.height * k, ox = (W - dw) / 2, oy = (H - dh) / 2;
+    ctx.drawImage(img, ox, oy, dw, dh);
+    tf = (p) => [ox + (p[0] * dw) / w, oy + (p[1] * dh) / h];
+  } else {
+    const xs = kps.map((p) => p[0]), ys = kps.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const k = 0.8 * Math.min(W / (x1 - x0 || 1), H / (y1 - y0 || 1));
+    tf = (p) => [W / 2 + (p[0] - (x0 + x1) / 2) * k, H / 2 + (p[1] - (y0 + y1) / 2) * k];
+  }
+  const hit = hand === 'L' ? [5, 7, 9] : [6, 8, 10];
+  ctx.lineCap = 'round';
+  for (const [a, b] of A.EDGES) {
+    const pa = tf(kps[a]), pb = tf(kps[b]);
+    ctx.strokeStyle = hit.includes(a) && hit.includes(b) ? '#e3f25a' : '#7cd0ff';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(...pa); ctx.lineTo(...pb); ctx.stroke();
+  }
+}
+
+async function renderLibrary() {
+  const list = $('ref-list');
+  if (!state.refs.length) {
+    list.innerHTML = '<p class="empty">No references yet. Add a pro clip above, or use "Save as pro reference" on any analyzed stroke.</p>';
+    return;
+  }
+  list.innerHTML = SHOTS.filter((s) => state.refs.some((r) => r.shot === s.id)).map((s) => `
+    <section class="ref-group"><h2>${esc(s.name)}</h2><div class="ref-cards">
+      ${refsForShot(s.id).map((r) => `
+        <article class="ref-card" data-id="${r.id}">
+          <canvas aria-label="Contact frame of ${esc(r.label)}"></canvas>
+          <div class="ref-card-body">
+            <div class="ref-card-title">${esc(r.label)}</div>
+            <div class="ref-card-meta">${r.hand === 'L' ? 'Left' : 'Right'}-handed · ${viewName(r.view)} · ${fmtDate(r.createdAt)}</div>
+            <div class="ref-card-actions">
+              <button type="button" class="btn btn-ghost btn-small" data-act="use">Compare with this</button>
+              <button type="button" class="btn btn-danger btn-small" data-act="delete">Delete</button>
+            </div>
+          </div>
+        </article>`).join('')}
+    </div></section>`).join('');
+  for (const card of list.querySelectorAll('.ref-card')) {
+    const r = state.refs.find((x) => x.id === card.dataset.id);
+    let img = null;
+    if (r.images?.[r.contact]) { try { img = await createImageBitmap(r.images[r.contact]); } catch { img = null; } }
+    drawThumb(card.querySelector('canvas'), img, r.frames[r.contact], r.width, r.height, r.hand);
+    img?.close?.();
+  }
+}
+
+$('ref-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const id = btn.closest('.ref-card').dataset.id;
+  const r = state.refs.find((x) => x.id === id);
+  if (btn.dataset.act === 'use') {
+    state.shot = r.shot; prefs.shot = r.shot;
+    prefs.refByShot = { ...(prefs.refByShot || {}), [r.shot]: r.id };
+    savePrefs();
+    document.querySelector(`input[name="shot"][value="${r.shot}"]`).checked = true;
+    refreshSetup();
+    location.hash = '#analyze';
+    reanalyzeCurrent();
+    renderCurrent();
+  } else if (btn.dataset.act === 'delete') {
+    if (btn.dataset.confirm !== '1') {
+      btn.dataset.confirm = '1';
+      btn.textContent = 'Confirm delete';
+      setTimeout(() => { if (btn.isConnected) { btn.dataset.confirm = ''; btn.textContent = 'Delete'; } }, 4000);
+      return;
+    }
+    await store.remove('refs', id);
+    state.refs = state.refs.filter((x) => x.id !== id);
+    state.refBitmaps.get(id)?.forEach((b) => b.close?.());
+    state.refBitmaps.delete(id);
+    refreshSetup();
+    renderLibrary();
+  }
+});
+
+$('export-btn').addEventListener('click', async () => {
+  try {
+    const data = await store.exportAll();
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `stroke-match-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    showMessage($('library-message'), `Exported ${data.refs.length} references and ${data.sessions.length} saved analyses.`, 'ok');
+  } catch (e) { showMessage($('library-message'), `Export failed: ${e.message}`, 'error'); }
+});
+$('import-input').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  try {
+    const res = await store.importAll(JSON.parse(await f.text()));
+    await reloadData();
+    renderLibrary();
+    showMessage($('library-message'), `Imported ${res.refs} references and ${res.sessions} saved analyses.`, 'ok');
+  } catch (err) { showMessage($('library-message'), `Import failed: ${err.message}`, 'error'); }
+});
+
+// ---------- history ----------
+const thumbUrls = [];
+function renderHistory() {
+  thumbUrls.splice(0).forEach((u) => URL.revokeObjectURL(u));
+  const filter = $('history-filter');
+  const names = [...new Set(state.sessions.map((s) => s.student))].sort();
+  const cur = filter.value;
+  filter.innerHTML = '<option value="">All students</option>' + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  filter.value = names.includes(cur) ? cur : '';
+  const rows = state.sessions.filter((s) => !filter.value || s.student === filter.value).sort((a, b) => b.createdAt - a.createdAt);
+  if (!rows.length) {
+    $('history-list').innerHTML = '<p class="empty">Nothing saved yet. After analyzing a stroke, use "Save to history".</p>';
+    return;
+  }
+  $('history-list').innerHTML = rows.map((s) => {
+    let src = '';
+    if (s.thumb) { src = URL.createObjectURL(s.thumb); thumbUrls.push(src); }
+    const score = s.score != null ? `${s.score}<small>match</small>` : `${s.onTarget}/${s.rated}<small>on target</small>`;
+    return `<div class="history-row" data-id="${s.id}">
+      ${src ? `<img src="${src}" alt="">` : '<img alt="">'}
+      <div class="history-score">${score}</div>
+      <div class="history-main">
+        <div class="history-title">${esc(SHOT_BY_ID[s.shot]?.name || s.shot)} · ${esc(s.student)}</div>
+        <div class="history-meta">${fmtDate(s.createdAt)} · ${s.refLabel ? `vs ${esc(s.refLabel)}` : 'guide ranges'}${s.tips?.length ? ` · ${esc(s.tips[0])}` : ''}</div>
+      </div>
+      <button type="button" class="btn btn-danger btn-small" data-act="delete">Delete</button>
+    </div>`;
+  }).join('');
+}
+$('history-filter').addEventListener('change', renderHistory);
+$('history-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-act="delete"]');
+  if (!btn) return;
+  if (btn.dataset.confirm !== '1') {
+    btn.dataset.confirm = '1'; btn.textContent = 'Confirm delete';
+    setTimeout(() => { if (btn.isConnected) { btn.dataset.confirm = ''; btn.textContent = 'Delete'; } }, 4000);
+    return;
+  }
+  const id = btn.closest('.history-row').dataset.id;
+  await store.remove('sessions', id);
+  state.sessions = state.sessions.filter((s) => s.id !== id);
+  renderHistory();
+});
+
+// ---------- boot ----------
+buildSetup();
+refreshSetup();
+route();
+showDemo();
+reloadData().then(() => { if (!location.hash || location.hash === '#analyze') renderCurrent(); });
+
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
