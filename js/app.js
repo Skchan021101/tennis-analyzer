@@ -277,7 +277,8 @@ async function renderCurrent() {
   $('save-ref-form').hidden = true;
   document.querySelector('.result .contact-adjust').hidden = isDemo;
 
-  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, refData?.label || 'the pro');
+  // Tips say "the reference"; the full reference name is shown in the heading.
+  const evalRes = A.evaluate(c.analysis.metrics, refData?.analysis.metrics || null, shotId, isDemo ? 'the demo pro' : 'the reference');
   let cmp = refData ? A.compareStrokes(c.analysis, refData.analysis) : null;
   if (cmp && cmp.score == null) cmp = null; // nothing comparable was tracked
   c.evaluation = evalRes;
