@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { StrokeViewer } from './viewer.js';
 import { makeDemoSamples, DEMO_SIZE } from './demo.js';
 
-const APP_VERSION = 'Version 5 · shot recognition trained on real strokes';
+const APP_VERSION = 'Version 6 · trained shot recognition, starter references';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
