@@ -1,4 +1,4 @@
-import { SHOTS, SHOT_BY_ID, VIEWS, AUTO, shotFromName } from './shots.js';
+import { SHOTS, SHOT_BY_ID, VIEWS, AUTO, METRICS, shotFromName } from './shots.js';
 import * as A from './analysis.js';
 import { createEstimator } from './pose.js';
 import { openVideo, processClip, extractFrames, bitmapsToBlobs, blobsToBitmaps, LiveSession } from './capture.js';
@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { StrokeViewer } from './viewer.js';
 import { makeDemoSamples, DEMO_SIZE } from './demo.js';
 
-const APP_VERSION = 'Version 4 · cleaner stroke detection';
+const APP_VERSION = 'Version 4 · cleaner detection, live swing overlay';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const viewName = (id) => VIEWS.find((v) => v.id === id)?.name || id;
@@ -28,6 +28,7 @@ const state = {
   current: null,
   clip: null,
   liveStrokes: [],
+  liveTally: {},
   live: null,
   refBitmaps: new Map(),
   busy: null,
@@ -459,6 +460,8 @@ async function startLive() {
   }
   if (state.live) return;
   state.clip = null;
+  if (!state.liveStrokes.length) state.liveTally = {};
+  renderTally();
   if (state.liveStrokes.length) renderLiveChips(state.current?.liveIndex ?? -1);
   else $('stroke-strip').hidden = true;
   $('live').hidden = false;
@@ -499,6 +502,8 @@ function releaseLiveStrokes() {
   if (state.live) state.liveStrokes.forEach((s) => state.live.release(s.bitmaps));
   else bitmaps.forEach((b) => b.close?.());
   state.liveStrokes = [];
+  state.liveTally = {};
+  stopReplay();
 }
 
 function renderLiveChips(active) {
@@ -508,6 +513,8 @@ function renderLiveChips(active) {
 }
 
 function stopLive() {
+  stopReplay();
+  $('live-banner').hidden = true;
   if (!state.live) { $('live').hidden = true; return; }
   state.live.stop();
   state.live = null;
@@ -531,6 +538,20 @@ function drawLiveOverlay({ kps, w, h, visible }) {
     ctx.strokeStyle = hit.includes(a) && hit.includes(b) ? '#e3f25a' : '#ffffff'; ctx.lineWidth = lw;
     ctx.beginPath(); ctx.moveTo(kps[a][0], kps[a][1]); ctx.lineTo(kps[b][0], kps[b][1]); ctx.stroke();
   }
+  // Hand path over the last 0.8 s, fading out, so the swing shape shows live.
+  const buf = state.live?.buffer || [];
+  const wi = state.hand === 'L' ? 9 : 10;
+  const tNow = buf.length ? buf[buf.length - 1].t : 0;
+  const trail = buf.filter((s) => s.t >= tNow - 0.8 && s.kps[wi][2] >= 0.2);
+  for (let k = 1; k < trail.length; k++) {
+    const age = (tNow - trail[k].t) / 0.8;
+    ctx.strokeStyle = `rgba(227, 242, 90, ${(0.9 * (1 - age)).toFixed(2)})`;
+    ctx.lineWidth = lw * (1.8 - age);
+    ctx.beginPath();
+    ctx.moveTo(trail[k - 1].kps[wi][0], trail[k - 1].kps[wi][1]);
+    ctx.lineTo(trail[k].kps[wi][0], trail[k].kps[wi][1]);
+    ctx.stroke();
+  }
   const st = $('live-status');
   const paused = !state.live?.detecting;
   if (paused) { st.textContent = 'Detection paused'; st.className = 'pill'; }
@@ -548,16 +569,88 @@ function onLiveStroke({ stroke, bitmaps, width, height }) {
     const old = state.liveStrokes.shift();
     state.live?.release(old.bitmaps);
   }
-  selectLiveStroke(state.liveStrokes.length - 1);
+  selectLiveStroke(state.liveStrokes.length - 1).then(() => {
+    const c = entry.current;
+    state.liveTally[c.shot] = (state.liveTally[c.shot] || 0) + 1;
+    entry.tallied = c.shot;
+    renderTally();
+    showSwingBanner(c);
+    startReplay(c);
+  });
+}
+
+// ---------- live overlay: swing label, shot count, instant replay ----------
+let bannerTimer = null;
+function showSwingBanner(c) {
+  const b = $('live-banner');
+  $('lb-shot').textContent = SHOT_BY_ID[c.shot].name;
+  $('lb-score').textContent = c.comparison ? `Match ${c.comparison.score}` : `${c.evaluation.onTarget}/${c.evaluation.rated} on target`;
+  const top = c.evaluation.tips[0];
+  $('lb-tip').textContent = top ? `Work on: ${METRICS[top.key].short.toLowerCase()}` : (c.evaluation.rated ? 'Nice one' : '');
+  b.hidden = false;
+  b.classList.remove('fade');
+  b.style.animation = 'none'; void b.offsetWidth; b.style.animation = ''; // replay the entrance
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => { b.classList.add('fade'); bannerTimer = setTimeout(() => { b.hidden = true; }, 600); }, 2600);
+}
+
+function renderTally() {
+  const entries = SHOTS.filter((s) => state.liveTally[s.id]).map((s) => `<span>${esc(s.short)}<b>${state.liveTally[s.id]}</b></span>`);
+  $('live-tally').innerHTML = entries.join('');
+  $('live-tally').hidden = !entries.length;
+}
+
+// Loop the last stroke in slow motion in the corner of the live view.
+const replay = { raf: 0, c: null };
+function startReplay(c) {
+  stopReplay();
+  if (!c.images?.length) return;
+  replay.c = c;
+  const box = $('live-replay-box'), cv = $('live-replay');
+  const img0 = c.images[0];
+  cv.width = Math.min(480, img0.width);
+  cv.height = Math.round((cv.width * img0.height) / img0.width);
+  $('live-replay-cap').textContent = `Replay · ${SHOT_BY_ID[c.shot].short}`;
+  box.hidden = false;
+  const n = c.images.length, fps = c.stroke.fps * 0.4; // 0.4x speed
+  const hit = c.analysis.hand === 'L' ? [[5, 7], [7, 9]] : [[6, 8], [8, 10]];
+  const t0 = performance.now();
+  const frame = (now) => {
+    if (replay.c !== c) return;
+    // rAF timestamps can be slightly earlier than t0, so clamp at 0.
+    const i = Math.floor(((Math.max(0, now - t0) / 1000) * fps) % (n + 8)); // short pause at the end
+    const k = Math.min(i, n - 1, c.stroke.frames.length - 1);
+    const ctx = cv.getContext('2d');
+    try { ctx.drawImage(c.images[k], 0, 0, cv.width, cv.height); } catch { ctx.fillStyle = '#0a1a28'; ctx.fillRect(0, 0, cv.width, cv.height); }
+    const sx = cv.width / c.width;
+    const kps = c.stroke.frames[k];
+    ctx.lineCap = 'round';
+    for (const [a, b] of A.EDGES) {
+      ctx.strokeStyle = hit.some(([x, y]) => (x === a && y === b) || (x === b && y === a)) ? '#e3f25a' : 'rgba(124, 208, 255, 0.95)';
+      ctx.lineWidth = Math.max(2, cv.width / 140);
+      ctx.beginPath(); ctx.moveTo(kps[a][0] * sx, kps[a][1] * sx); ctx.lineTo(kps[b][0] * sx, kps[b][1] * sx); ctx.stroke();
+    }
+    if (Math.abs(k - c.analysis.events.contact) <= 1) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(cv.width - 78, 6, 72, 20);
+      ctx.fillStyle = '#fff'; ctx.font = '600 12px Barlow, sans-serif'; ctx.fillText('CONTACT', cv.width - 70, 20);
+    }
+    replay.raf = requestAnimationFrame(frame);
+  };
+  replay.raf = requestAnimationFrame(frame);
+}
+function stopReplay() {
+  cancelAnimationFrame(replay.raf);
+  replay.c = null;
+  $('live-replay-box').hidden = true;
 }
 
 function selectLiveStroke(i) {
   const s = state.liveStrokes[i];
-  if (!s) return;
+  if (!s) return Promise.resolve();
   if (!s.current) s.current = buildCurrent('live', s.full, s.bitmaps, s.width, s.height, { createdAt: s.createdAt });
   s.current.liveIndex = i;
   state.current = s.current;
-  renderCurrent().then(() => {
+  return renderCurrent().then(() => {
     s.score = s.current.comparison?.score;
     renderLiveChips(i);
     const st = $('live-status');
@@ -577,7 +670,10 @@ $('discard-stroke').addEventListener('click', () => {
   if (!c || c.source !== 'live') return;
   const i = state.liveStrokes.findIndex((s) => s.current === c);
   if (i < 0) return;
-  releaseLiveEntry(state.liveStrokes[i]);
+  const gone = state.liveStrokes[i];
+  if (gone.tallied && state.liveTally[gone.tallied]) { state.liveTally[gone.tallied]--; renderTally(); }
+  if (replay.c === gone.current) stopReplay();
+  releaseLiveEntry(gone);
   state.liveStrokes.splice(i, 1);
   if (state.liveStrokes.length) { selectLiveStroke(Math.min(i, state.liveStrokes.length - 1)); return; }
   state.current = null;

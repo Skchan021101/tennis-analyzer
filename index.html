@@ -97,6 +97,16 @@
             <span class="pill" id="live-status">Starting camera…</span>
             <span class="pill pill-quiet" id="live-fps"></span>
           </div>
+          <div class="live-banner" id="live-banner" aria-live="polite" hidden>
+            <span class="lb-shot" id="lb-shot"></span>
+            <span class="lb-score" id="lb-score"></span>
+            <span class="lb-tip" id="lb-tip"></span>
+          </div>
+          <div class="live-tally" id="live-tally" hidden></div>
+          <figure class="live-replay" id="live-replay-box" hidden>
+            <canvas id="live-replay" aria-label="Slow-motion replay of the last stroke"></canvas>
+            <figcaption id="live-replay-cap">Replay</figcaption>
+          </figure>
         </div>
         <div class="live-controls">
           <button type="button" class="btn btn-secondary" id="live-pause" aria-pressed="false">Pause detection</button>
