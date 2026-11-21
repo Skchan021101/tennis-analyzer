@@ -97,7 +97,7 @@ function buildSetup() {
     if (state.live) state.live.config.hand = state.hand;
     const c = state.current;
     if (c && c.source !== 'demo') {
-      c.detected = A.classifyStroke(c.full.stroke, { hand: state.hand });
+      c.detected = A.detectShot(c.full.stroke, { hand: state.hand });
       setCurrentShot(state.shot === 'auto' ? c.detected.shot : c.shot);
     }
   }));
@@ -227,7 +227,7 @@ function analyzeCurrent() {
 // the shot type changes (a serve needs more lead-in than a volley).
 function buildCurrent(source, full, images, width, height, extra = {}) {
   const c = { source, createdAt: Date.now(), full: { stroke: full, images }, width, height, ...extra };
-  c.detected = A.classifyStroke(full, { hand: state.hand });
+  c.detected = A.detectShot(full, { hand: state.hand });
   applyShot(c, state.shot === 'auto' ? c.detected.shot : state.shot);
   return c;
 }
@@ -398,7 +398,7 @@ async function analyzeClipFile(file) {
     if (state.clip?.video) URL.revokeObjectURL(state.clip.video.src);
     const items = strokes.map((contact) => {
       const full = A.cutStroke(res.seq, contact, 'auto');
-      return { contact, full, detected: A.classifyStroke(full, { hand: state.hand }) };
+      return { contact, full, detected: A.detectShot(full, { hand: state.hand }) };
     });
     state.clip = { video, ...res, strokes, items, timeScale };
     if (!strokes.length) {
@@ -797,7 +797,7 @@ $('ref-input').addEventListener('change', async (e) => {
     if (!strokes.length) { showMessage($('ref-message'), 'No swing was found. Check the whole body is visible and "Plays" is set correctly.', 'error'); return; }
     const items = strokes.map((contact) => {
       const full = A.cutStroke(res.seq, contact, 'auto');
-      const detected = A.classifyStroke(full, { hand });
+      const detected = A.detectShot(full, { hand });
       return { contact, full, shot: shot === 'auto' ? detected.shot : shot };
     });
     if (refDraft.clip?.video) URL.revokeObjectURL(refDraft.clip.video.src);
@@ -963,7 +963,7 @@ async function importClip(file, filePath, opts, est, signal, onProgress) {
     const v = A.speedSeries(res.seq.frames, opts.hand === 'L' ? 9 : 10, res.seq.fps, A.torsoLength(res.seq.frames));
     const contact = contacts.reduce((b, c) => (v[c] > v[b] ? c : b));
     const full = A.cutStroke(res.seq, contact, 'auto');
-    const shot = named || A.classifyStroke(full, { hand: opts.hand }).shot;
+    const shot = named || A.detectShot(full, { hand: opts.hand }).shot;
     const { range, stroke } = A.recut(full, shot);
     const analysis = A.analyzeStroke(stroke, { shot, hand: opts.hand });
     let images = null;

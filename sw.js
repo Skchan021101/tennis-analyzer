@@ -3,7 +3,7 @@
 const CACHE = 'stroke-match-v4';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png',
-  'js/app.js', 'js/analysis.js', 'js/capture.js', 'js/demo.js', 'js/pose.js', 'js/shots.js', 'js/store.js', 'js/viewer.js',
+  'js/app.js', 'js/analysis.js', 'js/shotmodel.js', 'js/capture.js', 'js/demo.js', 'js/pose.js', 'js/shots.js', 'js/store.js', 'js/viewer.js',
   'vendor/tf-4.22.0.min.js',
 ];
 // The pose models (5 MB and 12 MB) are cached the first time they're used.

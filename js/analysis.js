@@ -3,6 +3,7 @@
 // Pure functions only (no DOM), so they run in the browser and in Node tests.
 
 import { SHOT_BY_ID, METRICS, metricCopy, formatMetric, shotConfig } from './shots.js';
+import { SHOT_MODEL } from './shotmodel.js';
 
 // MoveNet keypoint order (anatomical left/right of the player).
 export const KP = {
@@ -709,4 +710,14 @@ export function predictShot(model, x) {
   const p = ex.map((v) => v / se);
   const k = p.indexOf(Math.max(...p));
   return { shot: model.classes[k], confidence: p[k], probs: Object.fromEntries(model.classes.map((c, i) => [c, p[i]])) };
+}
+
+// Recognise the shot type of a captured stroke window. Uses the model trained
+// on real strokes (js/shotmodel.js); falls back to the hand-written rules.
+export function detectShot(stroke, { hand = 'R' } = {}) {
+  if (SHOT_MODEL) {
+    const r = predictShot(SHOT_MODEL, strokeFeatures(stroke, hand));
+    return { shot: r.shot, confidence: r.confidence, probs: r.probs, method: 'model' };
+  }
+  return { ...classifyStroke(stroke, { hand }), method: 'rules' };
 }
