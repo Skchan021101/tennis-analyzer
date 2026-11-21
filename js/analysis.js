@@ -643,7 +643,7 @@ export function recut(full, shot) {
 // Hand heights, sideways positions along the shoulder line, hand gap and
 // forward position at fixed times around contact, plus a few whole-stroke
 // measures. Used by js/shotmodel.js (trained on THETIS expert strokes).
-export const FEATURE_TIMES = [-0.6, -0.4, -0.2, 0, 0.2, 0.4];
+export const FEATURE_TIMES = [-1.2, -0.9, -0.6, -0.4, -0.2, 0, 0.2, 0.4];
 export function strokeFeatures(stroke, hand = 'R') {
   const { frames, fps } = stroke;
   const n = frames.length;
@@ -672,6 +672,15 @@ export function strokeFeatures(stroke, hand = 'R') {
   }
   const shoW = frames.map((p) => dist(p[5], p[6]) / torso);
   const pc = frames[contact];
+  // Serve vs overhead: a serve starts still with both hands low together and
+  // the tossing hand then goes up; an overhead usually involves moving.
+  const before = [];
+  for (let i = Math.max(0, contact - Math.round(1.6 * fps)); i <= Math.max(0, contact - Math.round(0.4 * fps)); i++) before.push(frames[i]);
+  const hipAt = (i) => mid(frames[clamp(i, 0, n - 1)][11], frames[clamp(i, 0, n - 1)][12]);
+  const moved = dist(hipAt(contact - Math.round(1.0 * fps)), hipAt(contact)) / torso;
+  const minGap = before.length ? Math.min(...before.map((p) => dist(p[wri], p[owri]) / torso)) : 0;
+  const maxOff = before.length ? Math.max(...before.map((p) => (hip0(p)[1] - p[owri][1]) / torso)) : 0;
+  f.push(moved, minGap, maxOff);
   f.push(
     Math.min(...shoW) / (Math.max(...shoW) || 1),
     angleAt(pc[ix.hitSho], pc[ix.hitElb], pc[ix.hitWri]) / 180 || 0,
@@ -686,11 +695,14 @@ const hip0 = (p) => mid(p[11], p[12]);
 // Returns the most likely shot, its probability and all probabilities.
 export function predictShot(model, x) {
   const D = model.mu.length;
-  const z = model.W.map((w) => {
-    let s = w[D];
-    for (let j = 0; j < D; j++) s += ((x[j] - model.mu[j]) / model.sd[j]) * w[j];
+  const xs = x.map((v, j) => (v - model.mu[j]) / model.sd[j]);
+  const layer = (W, input) => W.map((w) => {
+    let s = w[input.length];
+    for (let j = 0; j < input.length; j++) s += input[j] * w[j];
     return s;
   });
+  // 'mlp': one tanh hidden layer (W1, W2); otherwise plain softmax regression (W).
+  const z = model.type === 'mlp' ? layer(model.W2, layer(model.W1, xs).map(Math.tanh)) : layer(model.W, xs.slice(0, D));
   const mx = Math.max(...z);
   const ex = z.map((v) => Math.exp(v - mx));
   const se = ex.reduce((a, b) => a + b, 0);
