@@ -215,11 +215,30 @@
             </select>
           </label>
         </div>
-        <label class="btn btn-primary file-btn">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 9l5-5 5 5M5 19h14"/></svg>
-          Choose reference clip
-          <input type="file" id="ref-input" accept="video/*">
-        </label>
+        <div class="ref-sources">
+          <label class="btn btn-primary file-btn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 9l5-5 5 5M5 19h14"/></svg>
+            Choose one clip
+            <input type="file" id="ref-input" accept="video/*">
+          </label>
+          <label class="btn btn-secondary file-btn" id="bulk-folder-btn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z"/></svg>
+            Import a folder
+            <input type="file" id="bulk-folder" webkitdirectory multiple>
+          </label>
+          <label class="btn btn-secondary file-btn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            Choose several clips
+            <input type="file" id="bulk-files" accept="video/*" multiple>
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" id="bulk-frames" checked> Keep video frames with each reference (needed for side-by-side video; uses about 1–2 MB per clip)</label>
+        <p class="hint">For several clips or a folder, the settings above apply to every clip. With Auto-detect, folder and file names such as <em>forehand</em>, <em>backhand2hands</em>, <em>backhand_slice</em>, <em>volley</em>, <em>serve</em> or <em>smash</em> set the shot; otherwise it's detected from the swing. Each clip gives one reference: its strongest stroke. The label field above is added in front of each file name.</p>
+        <div class="bulk" id="bulk-panel" hidden>
+          <div class="progress-head"><span id="bulk-text"></span><button type="button" class="btn btn-ghost" id="bulk-cancel">Stop</button></div>
+          <div class="bar"><div class="bar-fill" id="bulk-fill"></div></div>
+          <ol class="bulk-list" id="bulk-list"></ol>
+        </div>
         <div class="card progress flat" id="ref-progress" hidden>
           <div class="progress-head"><span id="ref-progress-text"></span><button type="button" class="btn btn-ghost" id="ref-progress-cancel">Cancel</button></div>
           <div class="bar"><div class="bar-fill" id="ref-progress-fill"></div></div>
@@ -241,6 +260,7 @@
       <div class="library-tools">
         <button type="button" class="btn btn-ghost" id="export-btn">Export library and history</button>
         <label class="btn btn-ghost file-btn">Import<input type="file" id="import-input" accept="application/json,.json"></label>
+        <button type="button" class="btn btn-danger" id="delete-all-refs" hidden>Delete all references</button>
       </div>
       <div class="message" id="library-message" role="status" hidden></div>
       <div id="ref-list" class="ref-list"></div>

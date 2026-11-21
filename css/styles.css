@@ -264,9 +264,22 @@ select { padding-right: 32px; }
 .contact-adjust .label { margin-right: 4px; }
 
 /* ---------- library ---------- */
+.ref-sources { display: flex; flex-wrap: wrap; gap: 10px; }
+.check { display: flex; align-items: flex-start; gap: 10px; font-size: 0.95rem; cursor: pointer; }
+.check input { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--court); flex: none; }
+.bulk { display: grid; gap: 10px; }
+.bulk-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; max-height: 320px; overflow-y: auto; font-size: 0.92rem; }
+.bulk-list li { display: grid; grid-template-columns: 1.4em minmax(0, 1fr) auto; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; background: var(--bg); }
+.bulk-list .name { overflow-wrap: anywhere; }
+.bulk-list .what { color: var(--muted); text-align: right; }
+.bulk-list .ok .mark { color: var(--good); }
+.bulk-list .fail .mark { color: var(--work); }
+.bulk-list .skip .mark, .bulk-list .wait .mark { color: var(--muted); }
 .library-tools { display: flex; flex-wrap: wrap; gap: 8px; }
 .ref-list { display: grid; gap: 20px; }
 .ref-group h2 { font-size: 1.3rem; margin-bottom: 10px; }
+.ref-group h2 .count { font: 600 0.9rem/1 var(--font-body); color: var(--muted); margin-left: 6px; }
+.ref-group > .btn { margin-top: 8px; }
 .ref-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .ref-card { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; display: grid; }
 .ref-card canvas { width: 100%; aspect-ratio: 4 / 3; background: var(--stage); }

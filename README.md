@@ -22,6 +22,12 @@ with TensorFlow.js.
   speed so timing and hand-speed numbers are correct.
 - **Pro library.** Add reference strokes from pro footage you have the right to use, or your own
   demonstrations. "Save as pro reference" turns any analyzed stroke into a reference.
+- **Bulk import.** Choose a whole folder (desktop) or several clips at once (phones too). Each clip
+  gives one reference, its strongest stroke. With Auto-detect, folder or file names such as
+  `forehand`, `backhand2hands`, `backhand_slice`, `volley`, `serve` or `smash` set the shot;
+  otherwise it's detected from the swing.
+- **Closest match.** When a shot has several references, each stroke is compared with all of them
+  (same camera angle where possible) and scored against the most similar one.
 - **Comparison.**
   - The two strokes are lined up phase by phase (preparation or trophy, contact, finish), so a
     slower student swing still matches the pro's at each phase.
@@ -34,6 +40,23 @@ with TensorFlow.js.
   shot.
 - **History.** Save analyses per student to track progress. Export and import the library and
   history as a JSON file to move them to another device or share them with another coach.
+
+## Reference clips from the THETIS dataset
+
+[THETIS](https://github.com/THETIS-dataset/dataset) is a public research dataset: 55 players (p32–p55
+are the experienced ones) performing 12 strokes, filmed from the front, without a ball. Its videos
+are AVI files that browsers can't play, so convert them first with the included script. It needs
+`git` and `ffmpeg`; on Windows, use Git Bash.
+
+```bash
+tools/get-thetis.sh thetis-mp4 32-55 1
+```
+
+That downloads take 1 of every experienced player (about 260 clips, roughly 90 MB as MP4) into
+`thetis-mp4/<shot>/`. Then in the app: **Pro library**, set Shot to **Auto-detect**, Camera angle to
+**Front**, and choose **Import a folder** → `thetis-mp4`. Film students from the front too, so they
+match. Forehand slice is skipped because the app doesn't analyze it. Please cite the THETIS authors,
+and check with them before any commercial use.
 
 ## Filming tips
 

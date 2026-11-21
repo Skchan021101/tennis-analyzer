@@ -239,3 +239,25 @@ export function metricCopy(key, shotId, dir) {
   const m = METRICS[key];
   return (m.byShot && m.byShot[shotId] && m.byShot[shotId][dir]) || m[dir];
 }
+
+// Guess the shot from a file or folder name, e.g. THETIS folders such as
+// "backhand2hands", "forehand_flat" or "smash". Returns a shot id, the string
+// 'unsupported' for shots the app doesn't analyze (forehand slice), or null.
+export function shotFromName(path) {
+  // THETIS file names use short forms (p40_foreflat_s1, p12_bvolley_s2…).
+  const ABBR = { backhand2h: 'backhand 2hands', bslice: 'backhand slice', bvolley: 'backhand volley', fvolley: 'forehand volley', foreflat: 'forehand', foreopen: 'forehand', fslice: 'forehand slice', serflat: 'serve', serkick: 'serve', serslice: 'serve' };
+  const s = ` ${String(path).toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').map((w) => ABBR[w] || w).join(' ')} `;
+  const has = (re) => re.test(s);
+  const back = has(/ (backhand|bh)/) || has(/backhand/);
+  const fore = has(/ (forehand|fh)/) || has(/forehand/);
+  if (has(/volley/)) return back ? 'bhVolley' : fore ? 'fhVolley' : null;
+  if (has(/serv(e|ice|ing)?\b|serve/)) return 'serve';
+  if (has(/smash|overhead/)) return 'overhead';
+  if (back && has(/2 ?hands?|two ?hand|2h\b|double/)) return 'backhand2';
+  if (has(/ (bh ?2|2 ?bh) /)) return 'backhand2';
+  if (back && has(/slice/)) return 'slice';
+  if (fore && has(/slice/)) return 'unsupported';
+  if (back) return 'backhand1';
+  if (fore) return 'forehand';
+  return null;
+}
