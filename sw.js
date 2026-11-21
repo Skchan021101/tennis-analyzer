@@ -1,5 +1,6 @@
 // Offline cache so the app keeps working courtside with a weak connection.
-const CACHE = 'stroke-match-v1';
+// Bump with each release so old caches are dropped.
+const CACHE = 'stroke-match-v3';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png',
   'js/app.js', 'js/analysis.js', 'js/capture.js', 'js/demo.js', 'js/pose.js', 'js/shots.js', 'js/store.js', 'js/viewer.js',
@@ -30,7 +31,9 @@ self.addEventListener('fetch', (e) => {
     })));
     return;
   }
-  e.respondWith(fetch(e.request).then((res) => {
+  // 'no-cache' checks with the server every time (cheap when unchanged), so
+  // a new release shows on the next load instead of after the HTTP cache expires.
+  e.respondWith(fetch(e.request, { cache: 'no-cache' }).then((res) => {
     if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }
     return res;
   }).catch(() => caches.match(e.request, { ignoreSearch: true })));
