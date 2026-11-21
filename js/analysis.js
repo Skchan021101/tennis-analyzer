@@ -638,3 +638,46 @@ export function recut(full, shot) {
   const b = Math.min(full.frames.length - 1, full.contact + Math.round(cfg.post * full.fps));
   return { range: [a, b], stroke: { ...full, frames: full.frames.slice(a, b + 1), contact: full.contact - a, offset: (full.offset || 0) + a, t0: (full.t0 || 0) + a / full.fps } };
 }
+
+// ---------- features for the learned shot recogniser ----------
+// Hand heights, sideways positions along the shoulder line, hand gap and
+// forward position at fixed times around contact, plus a few whole-stroke
+// measures. Used by js/shotmodel.js (trained on THETIS expert strokes).
+export const FEATURE_TIMES = [-0.6, -0.4, -0.2, 0, 0.2, 0.4];
+export function strokeFeatures(stroke, hand = 'R') {
+  const { frames, fps } = stroke;
+  const n = frames.length;
+  const torso = torsoLength(frames);
+  const { wri, owri } = handIdx(hand);
+  const v = speedSeries(frames, wri, fps, torso);
+  const contact = clamp(stroke.contact != null ? stroke.contact : v.indexOf(Math.max(...v)), 1, Math.max(1, n - 2));
+  const dir = swingDirection(frames, wri, contact);
+  const ix = canonIndices(hand);
+  const f = [];
+  for (const dt of FEATURE_TIMES) {
+    const i = clamp(contact + Math.round(dt * fps), 0, n - 1);
+    const p = frames[i];
+    const hip = mid(p[11], p[12]);
+    const sm = mid(p[ix.hitSho], p[ix.offSho]);
+    const axis = [p[ix.hitSho][0] - p[ix.offSho][0], p[ix.hitSho][1] - p[ix.offSho][1]];
+    const lat = (q) => ((q[0] - sm[0]) * axis[0] + (q[1] - sm[1]) * axis[1]) / (torso * torso);
+    f.push(
+      (hip[1] - p[wri][1]) / torso, // hitting hand height
+      (hip[1] - p[owri][1]) / torso, // other hand height
+      lat(p[wri]), // hitting hand along the shoulder line (+ = hitting side)
+      lat(p[owri]),
+      dist(p[wri], p[owri]) / torso, // gap between the hands
+      ((p[wri][0] - hip[0]) * dir) / torso, // hitting hand ahead of the hips
+    );
+  }
+  const shoW = frames.map((p) => dist(p[5], p[6]) / torso);
+  const pc = frames[contact];
+  f.push(
+    Math.min(...shoW) / (Math.max(...shoW) || 1),
+    angleAt(pc[ix.hitSho], pc[ix.hitElb], pc[ix.hitWri]) / 180 || 0,
+    Math.log(1 + v[contact]),
+    (hip0(pc)[1] - pc[0][1]) / torso, // head height
+  );
+  return f.map((x) => (Number.isFinite(x) ? x : 0));
+}
+const hip0 = (p) => mid(p[11], p[12]);
